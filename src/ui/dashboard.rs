@@ -31,6 +31,7 @@ struct AppState {
     panes: HashMap<String, String>,
     mode: Mode,
     message: Option<String>,
+    light_bg: bool,
 }
 
 /// Drop session-store entries whose tmux session no longer exists (e.g. killed
@@ -44,10 +45,19 @@ fn reconcile(store: &mut SessionStore) -> Result<()> {
     Ok(())
 }
 
+/// Query the terminal's background color (via OSC 11) so we can pick a
+/// selection highlight that stays visible on light-background terminals,
+/// instead of always assuming a dark background.
+fn detect_light_bg() -> bool {
+    terminal_light::luma().map(|luma| luma > 0.6).unwrap_or(false)
+}
+
 pub fn run() -> Result<()> {
     tmux::ensure_server()?;
     let mut store = SessionStore::load()?;
     reconcile(&mut store)?;
+
+    let light_bg = detect_light_bg();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -61,6 +71,7 @@ pub fn run() -> Result<()> {
         panes: HashMap::new(),
         mode: Mode::Normal,
         message: None,
+        light_bg,
     };
     let result = event_loop(&mut terminal, &mut store, &mut state);
 
@@ -246,9 +257,10 @@ fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppSta
             };
             let selected = idx == state.selected;
             let (border_style, text_style) = if selected {
+                let highlight = if state.light_bg { Color::Blue } else { Color::Yellow };
                 (
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(highlight).add_modifier(Modifier::BOLD),
+                    Style::default(),
                 )
             } else {
                 (
