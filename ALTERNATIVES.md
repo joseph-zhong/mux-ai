@@ -1,4 +1,4 @@
-# mux-ai — Alternatives Survey
+# mux-ai > alternatives 
 
 Goal: a "hyperclaude"-style tool — tmux-like management of multiple coding agents in
 per-project git worktrees of the same repo, with lifecycle commands (start / inspect &
