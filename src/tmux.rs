@@ -103,14 +103,20 @@ pub fn pane_pid(name: &str) -> Result<Option<u32>> {
 /// detaches (C-\, bound above) or the session ends. Caller is responsible for
 /// suspending/resuming its own raw-mode TUI around this call.
 pub fn attach(name: &str) -> Result<()> {
-    let status = tmux()
+    let child = tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
-    if !status.success() {
-        bail!("tmux attach-session -t {name} exited with {status}");
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = stderr.trim();
+        if reason.is_empty() {
+            bail!("tmux attach-session -t {name} exited with {}", out.status);
+        }
+        bail!("tmux attach-session -t {name}: {reason}");
     }
     Ok(())
 }

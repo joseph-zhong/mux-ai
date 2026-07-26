@@ -130,6 +130,14 @@ fn event_loop(
                                     terminal.clear()?;
                                     if let Err(e) = attach_result {
                                         state.message = Some(format!("attach error: {e}"));
+                                        // Session likely died underneath us (e.g. its
+                                        // command exited); drop it so the tile doesn't
+                                        // stay stuck forever and the name frees up for
+                                        // re-creation.
+                                        let _ = reconcile(store);
+                                        if state.selected >= store.list().len() {
+                                            state.selected = store.list().len().saturating_sub(1);
+                                        }
                                     }
                                 }
                             }
