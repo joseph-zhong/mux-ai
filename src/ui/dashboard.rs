@@ -31,6 +31,7 @@ struct AppState {
     panes: HashMap<String, String>,
     mode: Mode,
     message: Option<String>,
+    light_bg: bool,
 }
 
 /// Drop session-store entries whose tmux session no longer exists (e.g. killed
@@ -44,10 +45,19 @@ fn reconcile(store: &mut SessionStore) -> Result<()> {
     Ok(())
 }
 
+/// Query the terminal's background color (via OSC 11) so we can pick a
+/// selection highlight that stays visible on light-background terminals,
+/// instead of always assuming a dark background.
+fn detect_light_bg() -> bool {
+    terminal_light::luma().map(|luma| luma > 0.6).unwrap_or(false)
+}
+
 pub fn run() -> Result<()> {
     tmux::ensure_server()?;
     let mut store = SessionStore::load()?;
     reconcile(&mut store)?;
+
+    let light_bg = detect_light_bg();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -61,6 +71,7 @@ pub fn run() -> Result<()> {
         panes: HashMap::new(),
         mode: Mode::Normal,
         message: None,
+        light_bg,
     };
     let result = event_loop(&mut terminal, &mut store, &mut state);
 
@@ -203,10 +214,19 @@ fn draw(f: &mut Frame, store: &SessionStore, state: &mut AppState) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
         .split(area);
     draw_grid(f, chunks[0], store, state);
-    draw_status_line(f, chunks[1], store, state);
+    draw_commands_line(f, chunks[1]);
+    draw_status_line(f, chunks[2], store, state);
+}
+
+fn draw_commands_line(f: &mut Frame, area: Rect) {
+    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-\\ in session returns here)   n new   k kill   q quit";
+    f.render_widget(
+        Paragraph::new(Line::from(line)).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
 }
 
 fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppState) {
@@ -244,10 +264,17 @@ fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppSta
                 continue;
             };
             let selected = idx == state.selected;
-            let border_style = if selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            let (border_style, text_style) = if selected {
+                let highlight = if state.light_bg { Color::Blue } else { Color::Yellow };
+                (
+                    Style::default().fg(highlight).add_modifier(Modifier::BOLD),
+                    Style::default(),
+                )
             } else {
-                Style::default().fg(Color::DarkGray)
+                (
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::DarkGray),
+                )
             };
             let title = format!(" {} ", session.name);
             let block = Block::default()
@@ -272,6 +299,7 @@ fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppSta
                 .join("\n");
 
             let para = Paragraph::new(tail)
+                .style(text_style)
                 .block(block)
                 .wrap(Wrap { trim: false });
             f.render_widget(para, col_areas[col_idx]);
@@ -290,10 +318,7 @@ fn draw_status_line(f: &mut Frame, area: Rect, store: &SessionStore, state: &App
                 .unwrap_or("?");
             format!("Kill '{name}'? y/n")
         }
-        Mode::Normal => state.message.clone().unwrap_or_else(|| {
-            "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-\\ in session returns here)   n new   k kill   q quit"
-                .to_string()
-        }),
+        Mode::Normal => state.message.clone().unwrap_or_default(),
     };
     f.render_widget(Paragraph::new(Line::from(line)), area);
 }

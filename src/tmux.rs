@@ -33,12 +33,25 @@ fn run_ok(cmd: &mut Command) -> Result<String> {
 pub fn ensure_server() -> Result<()> {
     let _ = tmux().args(["start-server"]).output();
     let _ = bind_detach_key();
+    let _ = configure_status_bar();
     Ok(())
 }
 
 /// -n binds with no prefix key, so C-\ detaches directly from inside any session.
 fn bind_detach_key() -> Result<()> {
     run_ok(tmux().args(["bind-key", "-n", DETACH_KEY, "detach-client"]))?;
+    Ok(())
+}
+
+/// Once attached, a session owns the whole screen and our dashboard's own
+/// command bar can't render there — so the "how do I get back" hint has to
+/// live in tmux's own status line instead, which stays on screen no matter
+/// which pane is attached.
+fn configure_status_bar() -> Result<()> {
+    // status-left-length defaults to 10, which truncates our hint before the
+    // session name even starts rendering.
+    run_ok(tmux().args(["set-option", "-g", "status-left-length", "40"]))?;
+    run_ok(tmux().args(["set-option", "-g", "status-left", " ctrl-\\ to return to dashboard  [#S] "]))?;
     Ok(())
 }
 
@@ -52,9 +65,10 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         &cwd.to_string_lossy(),
         command,
     ]))?;
-    // The server is now guaranteed to have a live session, so this is guaranteed to
-    // apply (see ensure_server's note on exit-empty).
+    // The server is now guaranteed to have a live session, so these are guaranteed
+    // to apply (see ensure_server's note on exit-empty).
     bind_detach_key()?;
+    configure_status_bar()?;
     Ok(())
 }
 
