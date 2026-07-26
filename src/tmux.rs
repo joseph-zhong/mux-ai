@@ -4,9 +4,9 @@ use std::process::{Command, Stdio};
 
 /// mux-ai runs its own tmux server on a dedicated socket, isolated from the user's
 /// normal tmux config and sessions. This is what lets us rebind a single, unprefixed
-/// detach key (C-q) server-wide without touching ~/.tmux.conf.
+/// detach key (C-\) server-wide without touching ~/.tmux.conf.
 const SOCKET: &str = "muxai";
-const DETACH_KEY: &str = "C-q";
+const DETACH_KEY: &str = "C-\\";
 
 fn tmux() -> Command {
     let mut cmd = Command::new("tmux");
@@ -36,7 +36,7 @@ pub fn ensure_server() -> Result<()> {
     Ok(())
 }
 
-/// -n binds with no prefix key, so C-q detaches directly from inside any session.
+/// -n binds with no prefix key, so C-\ detaches directly from inside any session.
 fn bind_detach_key() -> Result<()> {
     run_ok(tmux().args(["bind-key", "-n", DETACH_KEY, "detach-client"]))?;
     Ok(())
@@ -100,17 +100,23 @@ pub fn pane_pid(name: &str) -> Result<Option<u32>> {
 }
 
 /// Hands the real terminal to tmux for an interactive attach. Blocks until the user
-/// detaches (C-q, bound above) or the session ends. Caller is responsible for
+/// detaches (C-\, bound above) or the session ends. Caller is responsible for
 /// suspending/resuming its own raw-mode TUI around this call.
 pub fn attach(name: &str) -> Result<()> {
-    let status = tmux()
+    let child = tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
-    if !status.success() {
-        bail!("tmux attach-session -t {name} exited with {status}");
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = stderr.trim();
+        if reason.is_empty() {
+            bail!("tmux attach-session -t {name} exited with {}", out.status);
+        }
+        bail!("tmux attach-session -t {name}: {reason}");
     }
     Ok(())
 }

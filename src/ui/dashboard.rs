@@ -130,6 +130,14 @@ fn event_loop(
                                     terminal.clear()?;
                                     if let Err(e) = attach_result {
                                         state.message = Some(format!("attach error: {e}"));
+                                        // Session likely died underneath us (e.g. its
+                                        // command exited); drop it so the tile doesn't
+                                        // stay stuck forever and the name frees up for
+                                        // re-creation.
+                                        let _ = reconcile(store);
+                                        if state.selected >= store.list().len() {
+                                            state.selected = store.list().len().saturating_sub(1);
+                                        }
                                     }
                                 }
                             }
@@ -283,7 +291,7 @@ fn draw_status_line(f: &mut Frame, area: Rect, store: &SessionStore, state: &App
             format!("Kill '{name}'? y/n")
         }
         Mode::Normal => state.message.clone().unwrap_or_else(|| {
-            "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-q in session returns here)   n new   k kill   q quit"
+            "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-\\ in session returns here)   n new   k kill   q quit"
                 .to_string()
         }),
     };
