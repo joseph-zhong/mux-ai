@@ -283,7 +283,7 @@ fn draw_status_line(f: &mut Frame, area: Rect, store: &SessionStore, state: &App
             format!("Kill '{name}'? y/n")
         }
         Mode::Normal => state.message.clone().unwrap_or_else(|| {
-            "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-q in session returns here)   n new   k kill   q quit"
+            "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-\\ in session returns here)   n new   k kill   q quit"
                 .to_string()
         }),
     };

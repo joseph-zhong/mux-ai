@@ -29,9 +29,9 @@ Rust, single static binary (`muxai`), built on:
 - **ratatui + crossterm** — TUI rendering and input.
 - **tmux**, on a **dedicated socket** (`tmux -L muxai`) — every mux-ai session is a
   real tmux session on this private server, isolated from the user's own tmux config
-  and sessions. This lets us rebind keys server-wide (e.g. a single `C-q` →
+  and sessions. This lets us rebind keys server-wide (e.g. a single `C-\` →
   `detach-client`) without touching `~/.tmux.conf`, which directly fixes the "exit
-  means control the sidebar" confusion from aoe: inside a session, `C-q` always
+  means control the sidebar" confusion from aoe: inside a session, `C-\` always
   detaches back to the dashboard, full stop.
 - **git worktree** — one worktree per session, created under
   `<repo>/.muxai/worktrees/<name>` (git-ignored), branch name = session name unless
@@ -60,7 +60,7 @@ for a working MVP and its absence doesn't block any other feature.
 1. Dashboard is a normal ratatui alt-screen app owning the terminal.
 2. On Enter: leave raw mode / alt screen, `exec`-equivalent `tmux -L muxai attach -t
    <session>` as a foreground child, inheriting stdio.
-3. The muxai tmux server has `C-q` bound (no prefix key) to `detach-client`. User
+3. The muxai tmux server has `C-\` bound (no prefix key) to `detach-client`. User
    presses it, tmux detaches, the child process exits.
 4. mux-ai re-enters raw mode / alt screen and redraws the dashboard. No state is lost
    in the tmux session itself — it keeps running headless.
