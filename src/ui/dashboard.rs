@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::session_store::SessionStore;
@@ -32,6 +33,7 @@ struct AppState {
     mode: Mode,
     message: Option<String>,
     light_bg: bool,
+    repo_root: PathBuf,
 }
 
 /// Drop session-store entries whose tmux session no longer exists (e.g. killed
@@ -57,6 +59,7 @@ pub fn run() -> Result<()> {
     let mut store = SessionStore::load()?;
     reconcile(&mut store)?;
 
+    let repo_root = crate::worktree::find_repo_root(&std::env::current_dir()?)?;
     let light_bg = detect_light_bg();
 
     enable_raw_mode()?;
@@ -72,6 +75,7 @@ pub fn run() -> Result<()> {
         mode: Mode::Normal,
         message: None,
         light_bg,
+        repo_root,
     };
     let result = event_loop(&mut terminal, &mut store, &mut state);
 
@@ -90,7 +94,7 @@ fn event_loop(
 
     loop {
         if last_poll.elapsed() >= POLL_INTERVAL {
-            for s in store.list() {
+            for s in store.for_repo(&state.repo_root) {
                 if let Ok(text) = tmux::capture_pane(&s.name, PANE_LINES) {
                     state.panes.insert(s.name.clone(), text);
                 }
@@ -107,7 +111,7 @@ fn event_loop(
                 }
                 match &mut state.mode {
                     Mode::Normal => {
-                        let len = store.list().len();
+                        let len = store.for_repo(&state.repo_root).len();
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Right => {
@@ -131,7 +135,7 @@ fn event_loop(
                                 }
                             }
                             KeyCode::Enter => {
-                                if let Some(session) = store.list().get(state.selected) {
+                                if let Some(session) = store.for_repo(&state.repo_root).get(state.selected) {
                                     let name = session.name.clone();
                                     disable_raw_mode()?;
                                     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -146,8 +150,9 @@ fn event_loop(
                                         // stay stuck forever and the name frees up for
                                         // re-creation.
                                         let _ = reconcile(store);
-                                        if state.selected >= store.list().len() {
-                                            state.selected = store.list().len().saturating_sub(1);
+                                        let len = store.for_repo(&state.repo_root).len();
+                                        if state.selected >= len {
+                                            state.selected = len.saturating_sub(1);
                                         }
                                     }
                                 }
@@ -183,12 +188,16 @@ fn event_loop(
                     },
                     Mode::ConfirmKill => match key.code {
                         KeyCode::Char('y') => {
-                            if let Some(session) = store.list().get(state.selected).cloned() {
+                            if let Some(session) = store
+                                .for_repo(&state.repo_root)
+                                .get(state.selected)
+                                .map(|s| (*s).clone())
+                            {
                                 let _ = tmux::kill_session(&session.name);
                                 let _ = crate::worktree::remove(&session.repo_root, &session.worktree_path);
                                 store.remove(&session.name);
                                 store.save()?;
-                                let len = store.list().len();
+                                let len = store.for_repo(&state.repo_root).len();
                                 if len > 0 && state.selected >= len {
                                     state.selected = len - 1;
                                 }
@@ -231,7 +240,7 @@ fn draw_commands_line(f: &mut Frame, area: Rect) {
 }
 
 fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppState) {
-    let sessions = store.list();
+    let sessions = store.for_repo(&state.repo_root);
     if sessions.is_empty() {
         let msg = Paragraph::new("No sessions yet. Press 'n' to create one, 'q' to quit.")
             .style(Style::default().fg(Color::DarkGray));
@@ -312,8 +321,8 @@ fn draw_status_line(f: &mut Frame, area: Rect, store: &SessionStore, state: &App
     let line = match &state.mode {
         Mode::NewInput(buf) => format!("New session name: {buf}_"),
         Mode::ConfirmKill => {
-            let name = store
-                .list()
+            let sessions = store.for_repo(&state.repo_root);
+            let name = sessions
                 .get(state.selected)
                 .map(|s| s.name.as_str())
                 .unwrap_or("?");

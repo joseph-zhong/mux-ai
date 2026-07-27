@@ -59,6 +59,15 @@ impl SessionStore {
         self.sessions.iter().find(|s| s.name == name)
     }
 
+    /// Sessions belonging to the given repo, e.g. so the dashboard only shows the
+    /// current directory's worktrees instead of every repo's sessions.
+    pub fn for_repo(&self, repo_root: &Path) -> Vec<&Session> {
+        self.sessions
+            .iter()
+            .filter(|s| s.repo_root == repo_root)
+            .collect()
+    }
+
     pub fn add(&mut self, session: Session) {
         self.sessions.retain(|s| s.name != session.name);
         self.sessions.push(session);
