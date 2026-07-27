@@ -185,6 +185,7 @@ fn event_loop(
                         KeyCode::Char('y') => {
                             if let Some(session) = store.list().get(state.selected).cloned() {
                                 let _ = tmux::kill_session(&session.name);
+                                let _ = crate::worktree::remove(&session.repo_root, &session.worktree_path);
                                 store.remove(&session.name);
                                 store.save()?;
                                 let len = store.list().len();
@@ -316,7 +317,7 @@ fn draw_status_line(f: &mut Frame, area: Rect, store: &SessionStore, state: &App
                 .get(state.selected)
                 .map(|s| s.name.as_str())
                 .unwrap_or("?");
-            format!("Kill '{name}'? y/n")
+            format!("Kill '{name}' and remove its worktree? y/n")
         }
         Mode::Normal => state.message.clone().unwrap_or_default(),
     };
