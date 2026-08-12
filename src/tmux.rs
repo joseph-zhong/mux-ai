@@ -34,6 +34,7 @@ pub fn ensure_server() -> Result<()> {
     let _ = tmux().args(["start-server"]).output();
     let _ = bind_detach_key();
     let _ = configure_status_bar();
+    let _ = set_window_size_manual();
     Ok(())
 }
 
@@ -55,6 +56,29 @@ fn configure_status_bar() -> Result<()> {
     Ok(())
 }
 
+/// Dashboard tiles are much narrower than a real terminal. Re-wrapping a session's
+/// 80-column output into a 44-column tile is what shreds the text, so instead we size
+/// each window to its tile and let the agent inside wrap its own output correctly.
+/// tmux only honours `resize-window` while `window-size` is `manual`; under the default
+/// (`latest`) it snaps the window back to the last client's size.
+fn set_window_size_manual() -> Result<()> {
+    run_ok(tmux().args(["set-option", "-g", "window-size", "manual"]))?;
+    Ok(())
+}
+
+pub fn resize_window(name: &str, width: u16, height: u16) -> Result<()> {
+    run_ok(tmux().args([
+        "resize-window",
+        "-t",
+        name,
+        "-x",
+        &width.to_string(),
+        "-y",
+        &height.to_string(),
+    ]))?;
+    Ok(())
+}
+
 pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
     run_ok(tmux().args([
         "new-session",
@@ -69,6 +93,7 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
     // to apply (see ensure_server's note on exit-empty).
     bind_detach_key()?;
     configure_status_bar()?;
+    set_window_size_manual()?;
     Ok(())
 }
 
@@ -117,6 +142,12 @@ pub fn pane_pid(name: &str) -> Result<Option<u32>> {
 /// detaches (C-\, bound above) or the session ends. Caller is responsible for
 /// suspending/resuming its own raw-mode TUI around this call.
 pub fn attach(name: &str) -> Result<()> {
+    // While attached the session owns the whole terminal, so drop the tile-sized
+    // window we imposed for the grid and let tmux size to the real client. The
+    // dashboard re-imposes tile sizes once it has the screen back.
+    let _ = tmux()
+        .args(["set-option", "-g", "window-size", "latest"])
+        .output();
     let child = tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())
@@ -124,6 +155,7 @@ pub fn attach(name: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()?;
     let out = child.wait_with_output()?;
+    let _ = set_window_size_manual();
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let reason = stderr.trim();
