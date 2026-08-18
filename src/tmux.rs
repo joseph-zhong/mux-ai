@@ -34,7 +34,7 @@ pub fn ensure_server() -> Result<()> {
     let _ = tmux().args(["start-server"]).output();
     let _ = bind_detach_key();
     let _ = configure_status_bar();
-    let _ = set_window_size_manual();
+    let _ = configure_window_sizing();
     Ok(())
 }
 
@@ -61,8 +61,18 @@ fn configure_status_bar() -> Result<()> {
 /// each window to its tile and let the agent inside wrap its own output correctly.
 /// tmux only honours `resize-window` while `window-size` is `manual`; under the default
 /// (`latest`) it snaps the window back to the last client's size.
-fn set_window_size_manual() -> Result<()> {
+///
+/// `resize-window` also marks the window *permanently* manually-sized — flipping the
+/// `window-size` option back is not enough to undo it, which is why attaching used to
+/// leave the session stuck inside a tile-sized box in the corner of the terminal. The
+/// two hooks are the undo: on attach, and on every later terminal resize, `-A` snaps
+/// the window to the attached client. They only fire when a client exists, i.e. only
+/// while someone is attached — the dashboard itself is not a tmux client, so tile
+/// sizing is untouched.
+fn configure_window_sizing() -> Result<()> {
     run_ok(tmux().args(["set-option", "-g", "window-size", "manual"]))?;
+    run_ok(tmux().args(["set-hook", "-g", "client-attached", "resize-window -A"]))?;
+    run_ok(tmux().args(["set-hook", "-g", "client-resized", "resize-window -A"]))?;
     Ok(())
 }
 
@@ -93,7 +103,7 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
     // to apply (see ensure_server's note on exit-empty).
     bind_detach_key()?;
     configure_status_bar()?;
-    set_window_size_manual()?;
+    configure_window_sizing()?;
     Ok(())
 }
 
@@ -142,12 +152,9 @@ pub fn pane_pid(name: &str) -> Result<Option<u32>> {
 /// detaches (C-\, bound above) or the session ends. Caller is responsible for
 /// suspending/resuming its own raw-mode TUI around this call.
 pub fn attach(name: &str) -> Result<()> {
-    // While attached the session owns the whole terminal, so drop the tile-sized
-    // window we imposed for the grid and let tmux size to the real client. The
-    // dashboard re-imposes tile sizes once it has the screen back.
-    let _ = tmux()
-        .args(["set-option", "-g", "window-size", "latest"])
-        .output();
+    // The client-attached hook resizes the window to the real terminal as soon as
+    // this client lands, undoing the tile size we imposed for the grid. The dashboard
+    // re-imposes tile sizes once it has the screen back.
     let child = tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())
@@ -155,7 +162,6 @@ pub fn attach(name: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()?;
     let out = child.wait_with_output()?;
-    let _ = set_window_size_manual();
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let reason = stderr.trim();
