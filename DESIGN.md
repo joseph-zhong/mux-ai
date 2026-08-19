@@ -37,9 +37,15 @@ Rust, single static binary (`muxai`), built on:
   `<repo>/.muxai/worktrees/<name>` (git-ignored), branch name = session name unless
   overridden.
 - **JSON session store** (`~/.local/state/muxai/sessions.json`) — maps session name →
-  `{repo, worktree_path, branch, command, tmux_session, created_at}`. Source of truth
-  for what mux-ai manages; tmux/git are re-queried live and reconciled against it
-  (handles sessions killed outside mux-ai).
+  `{repo, worktree_path, branch, command, tmux_session, created_at}`. A **metadata
+  cache, not a source of truth**: git owns worktrees, tmux owns sessions, and both are
+  re-queried live on every dashboard refresh. The store exists only to remember the
+  command a session was started with, so a stopped worktree can be restarted with the
+  same agent. Losing the file costs that and nothing else.
+
+  This originally read "source of truth for what mux-ai manages; tmux/git are
+  re-queried live and reconciled against it", which is backwards and licensed a bug
+  that hid six live worktrees. See `POSTMORTEM.md` (2026-08-19) and `ARCHITECTURE.md`.
 
 No daemon. Every `muxai` invocation is a fresh process that shells out to `tmux`/`git`
 and reads/writes the JSON store. Simplicity over a client/server split — revisit only

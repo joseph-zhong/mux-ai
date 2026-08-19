@@ -1,9 +1,15 @@
 # mux-ai
 
 Grid-dashboard TUI for running several coding agents in parallel, each in its own git
-worktree, on top of tmux. See [`DESIGN.md`](DESIGN.md) for the architecture and
-[`ALTERNATIVES.md`](ALTERNATIVES.md) for why this exists instead of just using aoe /
-Claude Squad / etc.
+worktree, on top of tmux.
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — what it does: state ownership, process model,
+  data flow, known structural gaps.
+- [`DESIGN.md`](DESIGN.md) — why it is shaped this way.
+- [`ALTERNATIVES.md`](ALTERNATIVES.md) — why this exists instead of aoe / Claude Squad / etc.
+- [`FUTURE.md`](FUTURE.md) — backlog.
+- [`POSTMORTEM.md`](POSTMORTEM.md) — incidents and what they taught.
+- [`plans/`](plans/) — stock-takes and strategy notes.
 
 ## Install & demo
 
