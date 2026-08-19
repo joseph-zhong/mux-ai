@@ -31,12 +31,30 @@ fn main() -> Result<()> {
             };
             let session = create_session(&mut store, &repo_root, &name, branch.as_deref(), &cmd)?;
             println!(
-                "created session '{}' in {} (branch '{}')\n  attach: muxai   (then select it and press Enter)",
+                "created session '{}' in {} (branch '{}')\n  attach: muxai attach {}   (or `muxai`, then select it and press Enter)",
                 session.name,
                 session.worktree_path.display(),
-                session.branch
+                session.branch,
+                session.name
             );
             Ok(())
+        }
+        Command::Attach { name } => {
+            // Live tmux sessions, not the store — same source of truth the dashboard
+            // uses, so `attach` can't disagree with what the grid shows.
+            let live = tmux::list_sessions_with_paths()?;
+            if !live.iter().any(|(n, _)| *n == name) {
+                let names: Vec<&str> = live.iter().map(|(n, _)| n.as_str()).collect();
+                anyhow::bail!(
+                    "no running session '{name}'{}",
+                    if names.is_empty() {
+                        " (none are running)".to_string()
+                    } else {
+                        format!(" — running: {}", names.join(", "))
+                    }
+                );
+            }
+            tmux::attach(&name)
         }
         Command::Kill { name, remove_worktree } => {
             let mut store = SessionStore::load()?;
