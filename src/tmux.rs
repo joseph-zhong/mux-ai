@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// mux-ai runs its own tmux server on a dedicated socket, isolated from the user's
@@ -107,17 +107,19 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn list_sessions() -> Result<Vec<String>> {
+/// Live sessions plus each one's working directory, so the dashboard can tell which
+/// live sessions belong to the repo it was launched from.
+pub fn list_sessions_with_paths() -> Result<Vec<(String, PathBuf)>> {
     let out = tmux()
-        .args(["list-sessions", "-F", "#{session_name}"])
+        .args(["list-sessions", "-F", "#{session_name}\t#{session_path}"])
         .output()?;
     if !out.status.success() {
-        // "no server running" / "no sessions" both land here — treat as empty.
         return Ok(Vec::new());
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(|l| l.to_string())
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(name, path)| (name.to_string(), PathBuf::from(path)))
         .collect())
 }
 

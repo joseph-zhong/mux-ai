@@ -147,11 +147,10 @@ pub fn format_kb(kb: u64) -> String {
 }
 
 /// Deletes only RECLAIMABLE_DIRS inside each worktree, prunes dead worktree
-/// registrations, and drops sessions from the store whose tmux session is gone.
+/// registrations, and drops sessions from the store whose worktree is gone.
 /// Never touches shared caches.
 pub fn reset(store: &mut SessionStore, yes: bool) -> Result<Vec<String>> {
     let mut log = Vec::new();
-    let running = tmux::list_sessions()?;
 
     for session in store.list() {
         for dir in RECLAIMABLE_DIRS {
@@ -180,11 +179,18 @@ pub fn reset(store: &mut SessionStore, yes: bool) -> Result<Vec<String>> {
                 worktree::prune(&session.repo_root)?;
             }
         }
-        let dropped = store.retain_running(&running);
+        // Keyed on the worktree, not on tmux: an agent exiting leaves the work on
+        // disk, and dropping the record there would hide it from the dashboard.
+        let dropped: Vec<String> = store
+            .list()
+            .iter()
+            .filter(|s| !s.worktree_path.exists())
+            .map(|s| s.name.clone())
+            .collect();
         for name in dropped {
+            store.remove(&name)?;
             log.push(format!("dropped stale session record: {name}"));
         }
-        store.save()?;
     }
 
     Ok(log)

@@ -59,39 +59,25 @@ impl SessionStore {
         self.sessions.iter().find(|s| s.name == name)
     }
 
-    /// Sessions belonging to the given repo, e.g. so the dashboard only shows the
-    /// current directory's worktrees instead of every repo's sessions.
-    pub fn for_repo(&self, repo_root: &Path) -> Vec<&Session> {
-        self.sessions
-            .iter()
-            .filter(|s| s.repo_root == repo_root)
-            .collect()
-    }
-
-    pub fn add(&mut self, session: Session) {
+    /// Several muxai processes share one store file, and `save` rewrites the whole
+    /// file — so every mutation re-reads first, or a stale in-memory copy silently
+    /// deletes sessions another process created.
+    pub fn add(&mut self, session: Session) -> Result<()> {
+        *self = Self::load()?;
         self.sessions.retain(|s| s.name != session.name);
         self.sessions.push(session);
+        self.save()
     }
 
-    pub fn remove(&mut self, name: &str) -> Option<Session> {
-        if let Some(idx) = self.sessions.iter().position(|s| s.name == name) {
-            Some(self.sessions.remove(idx))
-        } else {
-            None
-        }
-    }
-
-    /// Drop entries whose tmux session no longer exists. Returns the removed names.
-    pub fn retain_running(&mut self, running: &[String]) -> Vec<String> {
-        let mut dropped = Vec::new();
-        self.sessions.retain(|s| {
-            let keep = running.contains(&s.name);
-            if !keep {
-                dropped.push(s.name.clone());
-            }
-            keep
-        });
-        dropped
+    pub fn remove(&mut self, name: &str) -> Result<Option<Session>> {
+        *self = Self::load()?;
+        let removed = self
+            .sessions
+            .iter()
+            .position(|s| s.name == name)
+            .map(|idx| self.sessions.remove(idx));
+        self.save()?;
+        Ok(removed)
     }
 }
 

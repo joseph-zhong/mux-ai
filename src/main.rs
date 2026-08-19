@@ -48,8 +48,7 @@ fn main() -> Result<()> {
             if remove_worktree {
                 worktree::remove(&session.repo_root, &session.worktree_path)?;
             }
-            store.remove(&name);
-            store.save()?;
+            store.remove(&name)?;
             println!("killed '{name}'{}", if remove_worktree { " and removed its worktree" } else { "" });
             Ok(())
         }
@@ -106,8 +105,7 @@ pub fn create_session(
         command: command.to_string(),
         created_at: Utc::now().to_rfc3339(),
     };
-    store.add(session.clone());
-    store.save()?;
+    store.add(session.clone())?;
     Ok(session)
 }
 

@@ -10,13 +10,16 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
 use std::io::{self, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::session_store::SessionStore;
-use crate::{create_session, tmux};
+use crate::session_store::{worktree_root, SessionStore};
+use crate::{create_session, tmux, worktree};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
+/// Re-scanning git and tmux costs two subprocesses, so it runs slower than the pane
+/// poll — fast enough that a session created in another muxai window shows up on its own.
+const DISCOVER_INTERVAL: Duration = Duration::from_secs(2);
 const PANE_LINES: u16 = 200;
 
 /// Legibility floor for a tile. Below this a cell shows nothing useful, so we'd rather
@@ -39,9 +42,17 @@ enum Mode {
     ConfirmKill,
 }
 
+/// One dashboard cell. Derived from durable state, not from the session store.
+struct Tile {
+    name: String,
+    worktree_path: PathBuf,
+    running: bool,
+}
+
 struct AppState {
     selected: usize,
     cols: usize,
+    tiles: Vec<Tile>,
     panes: HashMap<String, String>,
     /// Tile size we last pushed to each tmux window, so we only resize on change
     /// instead of shelling out to tmux every poll.
@@ -52,15 +63,47 @@ struct AppState {
     repo_root: PathBuf,
 }
 
-/// Drop session-store entries whose tmux session no longer exists (e.g. killed
-/// outside mux-ai, or the process inside it exited).
-fn reconcile(store: &mut SessionStore) -> Result<()> {
-    let running = tmux::list_sessions()?;
-    let dropped = store.retain_running(&running);
-    if !dropped.is_empty() {
-        store.save()?;
+/// What the dashboard shows is git's worktree list plus tmux's live session list —
+/// both durable — never the session store, which is only a metadata cache: several
+/// muxai processes overwrite it, and it used to be pruned on tmux liveness, which
+/// deleted the only record of a worktree the moment its agent exited. A session with
+/// no live tmux session stays visible as a stopped tile so its work is still reachable.
+fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
+    let root = worktree_root(repo_root);
+    let running = tmux::list_sessions_with_paths()?;
+
+    let mut tiles: Vec<Tile> = worktree::list(repo_root)?
+        .into_iter()
+        .map(|w| Tile {
+            running: running.iter().any(|(name, _)| *name == w.name),
+            name: w.name,
+            worktree_path: w.path,
+        })
+        .collect();
+
+    // A live session whose worktree was deleted underneath it still has a running
+    // agent in it, so it needs a tile too.
+    for (name, path) in running {
+        if path.parent() == Some(root.as_path()) && !tiles.iter().any(|t| t.name == name) {
+            tiles.push(Tile {
+                name,
+                worktree_path: path,
+                running: true,
+            });
+        }
     }
-    Ok(())
+
+    tiles.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tiles)
+}
+
+fn refresh(state: &mut AppState) {
+    if let Ok(tiles) = discover(&state.repo_root) {
+        state.tiles = tiles;
+    }
+    if state.selected >= state.tiles.len() {
+        state.selected = state.tiles.len().saturating_sub(1);
+    }
 }
 
 /// Query the terminal's background color (via OSC 11) so we can pick a
@@ -73,7 +116,6 @@ fn detect_light_bg() -> bool {
 pub fn run() -> Result<()> {
     tmux::ensure_server()?;
     let mut store = SessionStore::load()?;
-    reconcile(&mut store)?;
 
     let repo_root = crate::worktree::find_repo_root(&std::env::current_dir()?)?;
     let light_bg = detect_light_bg();
@@ -87,6 +129,7 @@ pub fn run() -> Result<()> {
     let mut state = AppState {
         selected: 0,
         cols: 1,
+        tiles: Vec::new(),
         panes: HashMap::new(),
         sizes: HashMap::new(),
         mode: Mode::Normal,
@@ -108,21 +151,32 @@ fn event_loop(
     state: &mut AppState,
 ) -> Result<()> {
     let mut last_poll = Instant::now() - POLL_INTERVAL;
+    let mut last_discover = Instant::now() - DISCOVER_INTERVAL;
 
     loop {
+        if last_discover.elapsed() >= DISCOVER_INTERVAL {
+            refresh(state);
+            last_discover = Instant::now();
+        }
         if last_poll.elapsed() >= POLL_INTERVAL {
             if let Ok(size) = terminal.size() {
-                sync_window_sizes(store, state, grid_area(size));
+                sync_window_sizes(state, grid_area(size));
             }
-            for s in store.for_repo(&state.repo_root) {
-                if let Ok(text) = tmux::capture_pane(&s.name, PANE_LINES) {
-                    state.panes.insert(s.name.clone(), text);
+            let live: Vec<String> = state
+                .tiles
+                .iter()
+                .filter(|t| t.running)
+                .map(|t| t.name.clone())
+                .collect();
+            for name in live {
+                if let Ok(text) = tmux::capture_pane(&name, PANE_LINES) {
+                    state.panes.insert(name, text);
                 }
             }
             last_poll = Instant::now();
         }
 
-        terminal.draw(|f| draw(f, store, state))?;
+        terminal.draw(|f| draw(f, state))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -131,7 +185,7 @@ fn event_loop(
                 }
                 match &mut state.mode {
                     Mode::Normal => {
-                        let len = store.for_repo(&state.repo_root).len();
+                        let len = state.tiles.len();
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Right => {
@@ -155,31 +209,36 @@ fn event_loop(
                                 }
                             }
                             KeyCode::Enter => {
-                                if let Some(session) = store.for_repo(&state.repo_root).get(state.selected) {
-                                    let name = session.name.clone();
-                                    disable_raw_mode()?;
-                                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                    let attach_result = tmux::attach(&name);
-                                    enable_raw_mode()?;
-                                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                                    terminal.clear()?;
-                                    // tmux resized the window to the real terminal for
-                                    // the attach; forget our cached tile sizes so the
-                                    // next poll puts it back.
-                                    state.sizes.clear();
-                                    if let Err(e) = attach_result {
-                                        state.message = Some(format!("attach error: {e}"));
-                                        // Session likely died underneath us (e.g. its
-                                        // command exited); drop it so the tile doesn't
-                                        // stay stuck forever and the name frees up for
-                                        // re-creation.
-                                        let _ = reconcile(store);
-                                        let len = store.for_repo(&state.repo_root).len();
-                                        if state.selected >= len {
-                                            state.selected = len.saturating_sub(1);
+                                let Some((name, path, running)) = state
+                                    .tiles
+                                    .get(state.selected)
+                                    .map(|t| (t.name.clone(), t.worktree_path.clone(), t.running))
+                                else {
+                                    continue;
+                                };
+                                if !running {
+                                    match restart(store, &name, &path) {
+                                        Ok(()) => state.message = Some(format!("restarted '{name}'")),
+                                        Err(e) => {
+                                            state.message = Some(format!("restart error: {e}"));
+                                            continue;
                                         }
                                     }
                                 }
+                                disable_raw_mode()?;
+                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                                let attach_result = tmux::attach(&name);
+                                enable_raw_mode()?;
+                                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                                terminal.clear()?;
+                                // tmux resized the window to the real terminal for
+                                // the attach; forget our cached tile sizes so the
+                                // next poll puts it back.
+                                state.sizes.clear();
+                                if let Err(e) = attach_result {
+                                    state.message = Some(format!("attach error: {e}"));
+                                }
+                                refresh(state);
                             }
                             KeyCode::Char('n') => {
                                 state.mode = Mode::NewInput(String::new());
@@ -197,10 +256,11 @@ fn event_loop(
                             let name = buf.trim().to_string();
                             state.mode = Mode::Normal;
                             if !name.is_empty() {
-                                match new_from_cwd(store, &name) {
-                                    Ok(()) => state.message = Some(format!("created '{name}'")),
+                                match create_session(store, &state.repo_root, &name, None, "claude") {
+                                    Ok(_) => state.message = Some(format!("created '{name}'")),
                                     Err(e) => state.message = Some(format!("error: {e}")),
                                 }
+                                refresh(state);
                             }
                         }
                         KeyCode::Esc => state.mode = Mode::Normal,
@@ -212,19 +272,15 @@ fn event_loop(
                     },
                     Mode::ConfirmKill => match key.code {
                         KeyCode::Char('y') => {
-                            if let Some(session) = store
-                                .for_repo(&state.repo_root)
+                            if let Some((name, path)) = state
+                                .tiles
                                 .get(state.selected)
-                                .map(|s| (*s).clone())
+                                .map(|t| (t.name.clone(), t.worktree_path.clone()))
                             {
-                                let _ = tmux::kill_session(&session.name);
-                                let _ = crate::worktree::remove(&session.repo_root, &session.worktree_path);
-                                store.remove(&session.name);
-                                store.save()?;
-                                let len = store.for_repo(&state.repo_root).len();
-                                if len > 0 && state.selected >= len {
-                                    state.selected = len - 1;
-                                }
+                                let _ = tmux::kill_session(&name);
+                                let _ = worktree::remove(&state.repo_root, &path);
+                                let _ = store.remove(&name);
+                                refresh(state);
                             }
                             state.mode = Mode::Normal;
                         }
@@ -237,26 +293,32 @@ fn event_loop(
     Ok(())
 }
 
-fn new_from_cwd(store: &mut SessionStore, name: &str) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let repo_root = crate::worktree::find_repo_root(&cwd)?;
-    create_session(store, &repo_root, name, None, "claude")?;
-    Ok(())
+/// Bring a stopped session back up in its existing worktree, reusing the command the
+/// store remembers for it (falling back to `claude` if that record was lost).
+fn restart(store: &SessionStore, name: &str, worktree_path: &Path) -> Result<()> {
+    if !worktree_path.exists() {
+        anyhow::bail!("worktree {} no longer exists", worktree_path.display());
+    }
+    let command = store
+        .get(name)
+        .map(|s| s.command.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    tmux::new_session(name, worktree_path, &command)
 }
 
-fn draw(f: &mut Frame, store: &SessionStore, state: &mut AppState) {
+fn draw(f: &mut Frame, state: &mut AppState) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
         .split(area);
-    draw_grid(f, chunks[0], store, state);
+    draw_grid(f, chunks[0], state);
     draw_commands_line(f, chunks[1]);
-    draw_status_line(f, chunks[2], store, state);
+    draw_status_line(f, chunks[2], state);
 }
 
 fn draw_commands_line(f: &mut Frame, area: Rect) {
-    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach (C-\\ in session returns here)   n new   k kill   q quit";
+    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart (C-\\ in session returns here)   n new   k kill   q quit";
     f.render_widget(
         Paragraph::new(Line::from(line)).style(Style::default().fg(Color::DarkGray)),
         area,
@@ -297,41 +359,42 @@ fn pick_cols(n: usize, area: Rect) -> usize {
 /// Size each tmux window to the tile it renders into, so the agent inside wraps its own
 /// output at the tile width. Without this we re-wrap 80-column text into a 44-column
 /// cell and every line comes out shredded.
-fn sync_window_sizes(store: &SessionStore, state: &mut AppState, area: Rect) {
-    let sessions = store.for_repo(&state.repo_root);
-    if sessions.is_empty() {
+fn sync_window_sizes(state: &mut AppState, area: Rect) {
+    if state.tiles.is_empty() {
         return;
     }
-    let cols = pick_cols(sessions.len(), area);
-    let rows = sessions.len().div_ceil(cols);
+    let cols = pick_cols(state.tiles.len(), area);
+    let rows = state.tiles.len().div_ceil(cols);
     let inner_w = (area.width / cols as u16).saturating_sub(2);
     let inner_h = (area.height / rows as u16).saturating_sub(2);
     if inner_w == 0 || inner_h == 0 {
         return;
     }
-    for s in sessions {
-        if state.sizes.get(&s.name) == Some(&(inner_w, inner_h)) {
-            continue;
-        }
+    let stale: Vec<String> = state
+        .tiles
+        .iter()
+        .filter(|t| t.running && state.sizes.get(&t.name) != Some(&(inner_w, inner_h)))
+        .map(|t| t.name.clone())
+        .collect();
+    for name in stale {
         // Best-effort: a session that died between poll and resize just retries later.
-        if tmux::resize_window(&s.name, inner_w, inner_h).is_ok() {
-            state.sizes.insert(s.name.clone(), (inner_w, inner_h));
+        if tmux::resize_window(&name, inner_w, inner_h).is_ok() {
+            state.sizes.insert(name, (inner_w, inner_h));
         }
     }
 }
 
-fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppState) {
-    let sessions = store.for_repo(&state.repo_root);
-    if sessions.is_empty() {
-        let msg = Paragraph::new("No sessions yet. Press 'n' to create one, 'q' to quit.")
+fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
+    if state.tiles.is_empty() {
+        let msg = Paragraph::new("No worktrees yet. Press 'n' to create one, 'q' to quit.")
             .style(Style::default().fg(Color::DarkGray));
         f.render_widget(msg, area);
         return;
     }
 
-    let cols = pick_cols(sessions.len(), area);
+    let cols = pick_cols(state.tiles.len(), area);
     state.cols = cols;
-    let rows = sessions.len().div_ceil(cols);
+    let rows = state.tiles.len().div_ceil(cols);
 
     let row_constraints: Vec<Constraint> = (0..rows)
         .map(|_| Constraint::Ratio(1, rows as u32))
@@ -351,7 +414,7 @@ fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppSta
 
         for col_idx in 0..cols {
             let idx = row_idx * cols + col_idx;
-            let Some(session) = sessions.get(idx) else {
+            let Some(tile) = state.tiles.get(idx) else {
                 continue;
             };
             let selected = idx == state.selected;
@@ -367,17 +430,21 @@ fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppSta
                     Style::default().fg(Color::DarkGray),
                 )
             };
-            let title = format!(" {} ", session.name);
+            let title = if tile.running {
+                format!(" {} ", tile.name)
+            } else {
+                format!(" {} (stopped) ", tile.name)
+            };
             let block = Block::default()
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(border_style);
 
-            let text = state
-                .panes
-                .get(&session.name)
-                .cloned()
-                .unwrap_or_default();
+            let text = if tile.running {
+                state.panes.get(&tile.name).cloned().unwrap_or_default()
+            } else {
+                "no tmux session — press Enter to restart the agent here".to_string()
+            };
             let inner_height = col_areas[col_idx].height.saturating_sub(2) as usize;
             let tail: String = text
                 .lines()
@@ -400,14 +467,14 @@ fn draw_grid(f: &mut Frame, area: Rect, store: &SessionStore, state: &mut AppSta
 }
 
 
-fn draw_status_line(f: &mut Frame, area: Rect, store: &SessionStore, state: &AppState) {
+fn draw_status_line(f: &mut Frame, area: Rect, state: &AppState) {
     let line = match &state.mode {
         Mode::NewInput(buf) => format!("New session name: {buf}_"),
         Mode::ConfirmKill => {
-            let sessions = store.for_repo(&state.repo_root);
-            let name = sessions
+            let name = state
+                .tiles
                 .get(state.selected)
-                .map(|s| s.name.as_str())
+                .map(|t| t.name.as_str())
                 .unwrap_or("?");
             format!("Kill '{name}' and remove its worktree? y/n")
         }
