@@ -14,7 +14,7 @@ VERSION="${MUXAI_VERSION:-latest}"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 
-[ "$(uname -s)" = "Darwin" ] || die "these are macOS binaries; on Linux build from source with 'cargo install --git https://github.com/$REPO'"
+[ "$(uname -s)" = "Darwin" ] || die "muxai is macOS only"
 
 for dep in tmux git; do
   command -v "$dep" >/dev/null 2>&1 || echo "install.sh: warning: '$dep' is not on your PATH; muxai needs it at runtime" >&2

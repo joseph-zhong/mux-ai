@@ -1,7 +1,9 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
@@ -110,7 +112,9 @@ fn refresh(state: &mut AppState) {
 /// selection highlight that stays visible on light-background terminals,
 /// instead of always assuming a dark background.
 fn detect_light_bg() -> bool {
-    terminal_light::luma().map(|luma| luma > 0.6).unwrap_or(false)
+    terminal_light::luma()
+        .map(|luma| luma > 0.6)
+        .unwrap_or(false)
 }
 
 pub fn run() -> Result<()> {
@@ -218,7 +222,9 @@ fn event_loop(
                                 };
                                 if !running {
                                     match restart(store, &name, &path) {
-                                        Ok(()) => state.message = Some(format!("restarted '{name}'")),
+                                        Ok(()) => {
+                                            state.message = Some(format!("restarted '{name}'"))
+                                        }
                                         Err(e) => {
                                             state.message = Some(format!("restart error: {e}"));
                                             continue;
@@ -243,10 +249,8 @@ fn event_loop(
                             KeyCode::Char('n') => {
                                 state.mode = Mode::NewInput(String::new());
                             }
-                            KeyCode::Char('k') => {
-                                if len > 0 {
-                                    state.mode = Mode::ConfirmKill;
-                                }
+                            KeyCode::Char('k') if len > 0 => {
+                                state.mode = Mode::ConfirmKill;
                             }
                             _ => {}
                         }
@@ -256,7 +260,8 @@ fn event_loop(
                             let name = buf.trim().to_string();
                             state.mode = Mode::Normal;
                             if !name.is_empty() {
-                                match create_session(store, &state.repo_root, &name, None, "claude") {
+                                match create_session(store, &state.repo_root, &name, None, "claude")
+                                {
                                     Ok(_) => state.message = Some(format!("created '{name}'")),
                                     Err(e) => state.message = Some(format!("error: {e}")),
                                 }
@@ -310,7 +315,11 @@ fn draw(f: &mut Frame, state: &mut AppState) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(area);
     draw_grid(f, chunks[0], state);
     draw_commands_line(f, chunks[1]);
@@ -405,8 +414,9 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
         .split(area);
 
     for (row_idx, row_area) in row_areas.iter().enumerate() {
-        let col_constraints: Vec<Constraint> =
-            (0..cols).map(|_| Constraint::Ratio(1, cols as u32)).collect();
+        let col_constraints: Vec<Constraint> = (0..cols)
+            .map(|_| Constraint::Ratio(1, cols as u32))
+            .collect();
         let col_areas = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(col_constraints)
@@ -419,7 +429,11 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
             };
             let selected = idx == state.selected;
             let (border_style, text_style) = if selected {
-                let highlight = if state.light_bg { Color::Blue } else { Color::Yellow };
+                let highlight = if state.light_bg {
+                    Color::Blue
+                } else {
+                    Color::Yellow
+                };
                 (
                     Style::default().fg(highlight).add_modifier(Modifier::BOLD),
                     Style::default(),
@@ -465,7 +479,6 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
         }
     }
 }
-
 
 fn draw_status_line(f: &mut Frame, area: Rect, state: &AppState) {
     let line = match &state.mode {

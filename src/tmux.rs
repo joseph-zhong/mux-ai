@@ -52,7 +52,12 @@ fn configure_status_bar() -> Result<()> {
     // status-left-length defaults to 10, which truncates our hint before the
     // session name even starts rendering.
     run_ok(tmux().args(["set-option", "-g", "status-left-length", "40"]))?;
-    run_ok(tmux().args(["set-option", "-g", "status-left", " ctrl-\\ to return to dashboard  [#S] "]))?;
+    run_ok(tmux().args([
+        "set-option",
+        "-g",
+        "status-left",
+        " ctrl-\\ to return to dashboard  [#S] ",
+    ]))?;
     Ok(())
 }
 

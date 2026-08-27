@@ -83,8 +83,7 @@ You need, on the desktop running the agents:
 
 - A [Tailscale](https://tailscale.com) account with this machine enrolled, and MagicDNS
   enabled (Tailscale admin console → DNS → MagicDNS). Check with `tailscale status`.
-- macOS with Remote Login available. Linux works too; the sshd hardening in Step 3 is
-  portable, only the Remote Login toggle in Step 4 is macOS-specific.
+- macOS, with Remote Login available.
 
 Take note of your tailnet name — `tailscale status --json | grep -i magicdnssuffix`, or
 the machine list in the admin console. It looks like `tailXXXXXX.ts.net`, and your

@@ -38,7 +38,10 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Kill { name, remove_worktree } => {
+        Command::Kill {
+            name,
+            remove_worktree,
+        } => {
             let mut store = SessionStore::load()?;
             let session = store
                 .get(&name)
@@ -49,7 +52,14 @@ fn main() -> Result<()> {
                 worktree::remove(&session.repo_root, &session.worktree_path)?;
             }
             store.remove(&name)?;
-            println!("killed '{name}'{}", if remove_worktree { " and removed its worktree" } else { "" });
+            println!(
+                "killed '{name}'{}",
+                if remove_worktree {
+                    " and removed its worktree"
+                } else {
+                    ""
+                }
+            );
             Ok(())
         }
         Command::Status => {
@@ -133,7 +143,11 @@ fn print_status(store: &SessionStore) {
 
     let budget = report.memory_budget_bytes;
     let used = report.memory_bytes;
-    let ratio = if budget > 0 { used as f64 / budget as f64 } else { 0.0 };
+    let ratio = if budget > 0 {
+        used as f64 / budget as f64
+    } else {
+        0.0
+    };
     let flag = if ratio < 0.5 {
         "green"
     } else if ratio < 0.85 {
