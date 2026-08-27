@@ -16,7 +16,8 @@ pub struct Cli {
 pub enum Command {
     /// Create a worktree + tmux session running an agent command in it.
     New {
-        /// Session name (also used as the worktree directory name).
+        /// Session name (also used as the worktree directory name). `.` and `:` are
+        /// replaced with `-`, since tmux cannot address a session whose name has either.
         name: String,
         /// Branch to create for the worktree (defaults to the session name).
         #[arg(long)]

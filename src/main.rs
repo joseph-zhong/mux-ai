@@ -42,6 +42,7 @@ fn main() -> Result<()> {
             name,
             remove_worktree,
         } => {
+            let name = tmux::sanitize_name(&name);
             let mut store = SessionStore::load()?;
             let session = store
                 .get(&name)
@@ -94,21 +95,22 @@ pub fn create_session(
     branch: Option<&str>,
     command: &str,
 ) -> Result<Session> {
-    if store.get(name).is_some() {
+    let name = tmux::sanitize_name(name);
+    if store.get(&name).is_some() {
         anyhow::bail!("session '{name}' already exists");
     }
-    let branch = branch.unwrap_or(name).to_string();
-    let worktree_path = worktree::create(repo_root, name, &branch)?;
+    let branch = branch.unwrap_or(&name).to_string();
+    let worktree_path = worktree::create(repo_root, &name, &branch)?;
 
     tmux::ensure_server()?;
-    if let Err(e) = tmux::new_session(name, &worktree_path, command) {
+    if let Err(e) = tmux::new_session(&name, &worktree_path, command) {
         // Don't leave an orphaned worktree if the tmux session failed to start.
         let _ = worktree::remove(repo_root, &worktree_path);
         return Err(e);
     }
 
     let session = Session {
-        name: name.to_string(),
+        name,
         repo_root: repo_root.to_path_buf(),
         worktree_path,
         branch,

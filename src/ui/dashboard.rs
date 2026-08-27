@@ -262,7 +262,7 @@ fn event_loop(
                             if !name.is_empty() {
                                 match create_session(store, &state.repo_root, &name, None, "claude")
                                 {
-                                    Ok(_) => state.message = Some(format!("created '{name}'")),
+                                    Ok(s) => state.message = Some(format!("created '{}'", s.name)),
                                     Err(e) => state.message = Some(format!("error: {e}")),
                                 }
                                 refresh(state);

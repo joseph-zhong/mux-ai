@@ -81,6 +81,14 @@ fn configure_window_sizing() -> Result<()> {
     Ok(())
 }
 
+/// tmux target specs split on `:` (window) and `.` (pane), so a session whose name
+/// contains either can never be addressed by name — not even with the `=` exact-match
+/// prefix, which is applied after the split. tmux accepts such a name at creation and
+/// only fails later, on every attach and kill, so names are normalised up front.
+pub fn sanitize_name(name: &str) -> String {
+    name.replace(['.', ':'], "-")
+}
+
 pub fn resize_window(name: &str, width: u16, height: u16) -> Result<()> {
     run_ok(tmux().args([
         "resize-window",
@@ -183,4 +191,16 @@ pub fn attach(name: &str) -> Result<()> {
 pub fn kill_session(name: &str) -> Result<()> {
     run_ok(tmux().args(["kill-session", "-t", name]))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_name;
+
+    #[test]
+    fn target_separators_become_dashes() {
+        assert_eq!(sanitize_name("fix-josephzho.ng"), "fix-josephzho-ng");
+        assert_eq!(sanitize_name("a:b.c"), "a-b-c");
+        assert_eq!(sanitize_name("already-fine"), "already-fine");
+    }
 }
