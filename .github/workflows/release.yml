@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$version" != "$manifest" ]; then
+            echo "tag $tag does not match Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Add targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Fuse into a universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/muxai \
+            target/aarch64-apple-darwin/release/muxai \
+            target/x86_64-apple-darwin/release/muxai
+          strip -x dist/muxai
+          lipo -info dist/muxai
+          codesign --sign - --force dist/muxai
+
+      - name: Package
+        id: package
+        run: |
+          asset="muxai-${{ steps.version.outputs.tag }}-macos-universal.tar.gz"
+          tar -czf "$asset" -C dist muxai
+          shasum -a 256 "$asset" > "$asset.sha256"
+          cat "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "muxai ${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            "${{ steps.package.outputs.asset }}" \
+            "${{ steps.package.outputs.asset }}.sha256"

@@ -1,2 +1,5 @@
 /target
 .muxai/
+/dist
+muxai-*.tar.gz
+muxai-*.tar.gz.sha256

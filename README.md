@@ -11,17 +11,47 @@ expose and nothing here to authenticate. Reaching your agents from a phone is yo
 operating system's SSH over a WireGuard mesh, not a web UI behind a shared password:
 see [`PHONE_ACCESS.md`](PHONE_ACCESS.md).
 
-## Install & demo
+## Install
 
-Prerequisites: Rust (stable), `tmux`, `git` — see [Dependencies](#dependencies) below.
+Runtime prerequisites either way: `tmux` and `git`. See
+[Dependencies](#dependencies) below.
+
+**Prebuilt binary (macOS, no Rust needed).** One universal binary, Apple Silicon and
+Intel:
 
 ```sh
-cargo build --release
-# put target/release/muxai on your PATH, or:
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/joseph-zhong/mux-ai/main/install.sh | sh
 ```
 
-Demo, from inside any git repo:
+It drops `muxai` in `~/.local/bin` and prints a PATH hint if that directory isn't on
+your `PATH`. Override with `MUXAI_INSTALL_DIR=/usr/local/bin` or pin a version with
+`MUXAI_VERSION=v0.1.0`.
+
+While this repo is private the plain download 404s, and the script falls back to the
+GitHub CLI — so recipients need `brew install gh`, `gh auth login`, and read access to
+the repo. Once the repo is public the one-liner works unauthenticated, with no script
+change.
+
+**From source (any platform).** Needs Rust stable via [rustup](https://rustup.rs):
+
+```sh
+cargo install --git https://github.com/joseph-zhong/mux-ai   # from anywhere
+cargo install --path .                                       # from a clone
+cargo build --release                                        # or just build it
+```
+
+**If macOS refuses to open the binary.** Downloading the tarball in a browser tags it
+with a quarantine flag, and these binaries are ad-hoc signed rather than notarized, so
+Gatekeeper blocks them. The installer above avoids this entirely (`curl` doesn't set
+the flag). If you did download by hand:
+
+```sh
+xattr -d com.apple.quarantine ./muxai
+```
+
+## Demo
+
+From inside any git repo:
 
 ```sh
 muxai new demo -- 'echo hello from demo; sleep 300'   # worktree + tmux session
@@ -53,9 +83,10 @@ process that shells out to `tmux`/`git` and reads/writes the store.
 
 ## Dependencies
 
-- **Rust** stable, via [rustup](https://rustup.rs) — no MSRV pinned yet.
 - **tmux** — developed against 3.7b; anything reasonably recent should work.
 - **git** ≥ 2.5 (worktree support).
+- **Rust** stable, via [rustup](https://rustup.rs) — only to build from source; the
+  prebuilt binary needs no toolchain. No MSRV pinned yet.
 - Crate dependencies (ratatui, crossterm, clap, sysinfo, serde, chrono, dirs) are
   pulled by Cargo — nothing else to install manually.
 - Developed and tested on **macOS**. Should work on Linux (nothing macOS-specific in
@@ -94,7 +125,31 @@ process that shells out to `tmux`/`git` and reads/writes the store.
 See [`FUTURE.md`](FUTURE.md) — live control-mode streaming, a sandboxed/remote runner,
 merged-branch-aware `reset`, cache-env auto-injection on session creation, a config
 file, multi-repo dashboard filtering, and open-model agent presets. Not yet filed as
-GitHub issues (this repo has no remote / `gh` isn't authenticated on this machine yet).
+GitHub issues.
+
+## Releasing
+
+Releases are cut by tag. `.github/workflows/release.yml` builds both macOS
+architectures, fuses them with `lipo` into one universal binary, and attaches the
+tarball and its `.sha256` to a GitHub Release. The workflow refuses to run if the tag
+and the `version` in `Cargo.toml` disagree.
+
+```sh
+# 1. bump the version, commit it on a PR, merge
+sed -i '' 's/^version = .*/version = "0.2.0"/' Cargo.toml
+
+# 2. tag the merged commit — after the PR is merged, not before, or the tag lands
+#    on a commit the workflow does not exist on yet
+git checkout main && git pull
+git tag v0.2.0 && git push origin v0.2.0
+
+# 3. watch it, then check the assets landed. `gh run watch` needs an explicit run id
+#    when stdin is not a TTY, so resolve it first.
+gh run watch "$(gh run list --repo joseph-zhong/mux-ai --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+gh release view v0.2.0 --repo joseph-zhong/mux-ai
+```
+
+`workflow_dispatch` also takes a tag, for re-running a build without re-tagging.
 
 ## License
 
