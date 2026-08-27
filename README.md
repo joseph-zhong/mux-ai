@@ -3,7 +3,8 @@
 Grid-dashboard TUI for running several coding agents in parallel, each in its own git
 worktree, on top of tmux. See [`DESIGN.md`](DESIGN.md) for the architecture and
 [`ALTERNATIVES.md`](ALTERNATIVES.md) for why this exists instead of just using aoe /
-Claude Squad / etc.
+Claude Squad / etc. To reach your sessions from a phone, see
+[`PHONE_ACCESS.md`](PHONE_ACCESS.md).
 
 ## Install & demo
 

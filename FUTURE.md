@@ -52,4 +52,17 @@ migrate them.
    mileage with plain `claude` sessions.
 
 9. **Web/mobile view.** Explicitly out of scope — aoe already does this well if it's
-   ever needed; mux-ai's whole reason to exist is the terminal-native grid.
+   ever needed; mux-ai's whole reason to exist is the terminal-native grid. Note this
+   rules out a *web UI*, not remote access: phone access already works over Tailscale +
+   SSH with no code, documented in [`PHONE_ACCESS.md`](PHONE_ACCESS.md). Building an
+   HTTP API / daemon the way OpenCode and OpenChamber do is unnecessary here because
+   tmux is already the server.
+
+10. **Small-screen ergonomics**, the friction found while documenting phone access
+    (`PHONE_ACCESS.md`, "Known rough edges"). Roughly 60 lines total:
+    - `muxai attach <name>` subcommand, so a phone can jump straight into a session
+      instead of arrow-keying the grid (`src/cli.rs` has no `Attach` variant).
+    - A non-Ctrl detach fallback alongside `C-\` (`src/tmux.rs:42`) — soft keyboards
+      have no Ctrl key without the terminal app's accessory row.
+    - Narrow-terminal layout: below ~50 columns, render a session list plus one large
+      preview instead of the grid (`CELL_WIDTH` is 44 in `src/ui/dashboard.rs:20`).
