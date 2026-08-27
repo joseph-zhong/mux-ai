@@ -26,6 +26,10 @@ pub enum Command {
     },
     /// Grid dashboard of all sessions (default when run with no subcommand).
     Dashboard,
+    /// Attach straight into a session, skipping the dashboard.
+    Attach {
+        name: String,
+    },
     /// Kill a session.
     Kill {
         name: String,

@@ -318,7 +318,13 @@ fn draw(f: &mut Frame, state: &mut AppState) {
 }
 
 fn draw_commands_line(f: &mut Frame, area: Rect) {
-    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart (C-\\ in session returns here)   n new   k kill   q quit";
+    // The full hint is ~100 columns and would simply be cut off on a phone, taking the
+    // quit key with it — so a narrow screen gets a shorter one that still fits.
+    let line = if area.width < MIN_CELL_W {
+        "\u{2191}\u{2193} select  Enter attach  n new  k kill  q quit"
+    } else {
+        "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart (C-\\ or F12 in session returns here)   n new   k kill   q quit"
+    };
     f.render_widget(
         Paragraph::new(Line::from(line)).style(Style::default().fg(Color::DarkGray)),
         area,
@@ -356,6 +362,38 @@ fn pick_cols(n: usize, area: Rect) -> usize {
         .unwrap_or_else(|| ((area.width / MIN_CELL_W).max(1) as usize).min(n))
 }
 
+/// True when no grid can give every tile a legible cell — a phone screen over SSH,
+/// mainly. There the dashboard shows a compact session list plus one full-width preview
+/// of the selected session, instead of slicing a 40-column screen into shreds.
+fn use_list_view(n: usize, area: Rect) -> bool {
+    if n == 0 {
+        return false;
+    }
+    let cols = pick_cols(n, area);
+    let rows = n.div_ceil(cols) as u16;
+    area.width / (cols as u16) < MIN_CELL_W || area.height / rows.max(1) < MIN_CELL_H
+}
+
+/// List view's two halves: the session list on top, the selected session's preview below.
+/// The list takes one row per session plus its borders, but never more than half the
+/// screen — past that it scrolls and the preview keeps the rest.
+fn list_split(n: usize, area: Rect) -> (Rect, Rect) {
+    let wanted = (n as u16).saturating_add(2);
+    let list_h = wanted.min(area.height / 2).clamp(3, area.height);
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_h), Constraint::Min(0)])
+        .split(area);
+    (parts[0], parts[1])
+}
+
+/// Last `lines` rows of `text`. tmux already wrapped it to the target width, so this only
+/// ever drops whole lines.
+fn tail(text: &str, lines: usize) -> String {
+    let kept: Vec<&str> = text.lines().rev().take(lines.max(1)).collect();
+    kept.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
 /// Size each tmux window to the tile it renders into, so the agent inside wraps its own
 /// output at the tile width. Without this we re-wrap 80-column text into a 44-column
 /// cell and every line comes out shredded.
@@ -363,18 +401,33 @@ fn sync_window_sizes(state: &mut AppState, area: Rect) {
     if state.tiles.is_empty() {
         return;
     }
-    let cols = pick_cols(state.tiles.len(), area);
-    let rows = state.tiles.len().div_ceil(cols);
-    let inner_w = (area.width / cols as u16).saturating_sub(2);
-    let inner_h = (area.height / rows as u16).saturating_sub(2);
+    let (inner_w, inner_h) = if use_list_view(state.tiles.len(), area) {
+        // Only the selected session is rendered here, so it is the only one worth
+        // resizing — and it gets the preview pane, not a grid cell.
+        let (_, preview) = list_split(state.tiles.len(), area);
+        (preview.width.saturating_sub(2), preview.height.saturating_sub(2))
+    } else {
+        let cols = pick_cols(state.tiles.len(), area);
+        let rows = state.tiles.len().div_ceil(cols);
+        (
+            (area.width / cols as u16).saturating_sub(2),
+            (area.height / rows as u16).saturating_sub(2),
+        )
+    };
     if inner_w == 0 || inner_h == 0 {
         return;
     }
+    let list_view = use_list_view(state.tiles.len(), area);
     let stale: Vec<String> = state
         .tiles
         .iter()
-        .filter(|t| t.running && state.sizes.get(&t.name) != Some(&(inner_w, inner_h)))
-        .map(|t| t.name.clone())
+        .enumerate()
+        .filter(|(idx, t)| {
+            (!list_view || *idx == state.selected)
+                && t.running
+                && state.sizes.get(&t.name) != Some(&(inner_w, inner_h))
+        })
+        .map(|(_, t)| t.name.clone())
         .collect();
     for name in stale {
         // Best-effort: a session that died between poll and resize just retries later.
@@ -389,6 +442,11 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
         let msg = Paragraph::new("No worktrees yet. Press 'n' to create one, 'q' to quit.")
             .style(Style::default().fg(Color::DarkGray));
         f.render_widget(msg, area);
+        return;
+    }
+
+    if use_list_view(state.tiles.len(), area) {
+        draw_list_view(f, area, state);
         return;
     }
 
@@ -446,24 +504,75 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
                 "no tmux session — press Enter to restart the agent here".to_string()
             };
             let inner_height = col_areas[col_idx].height.saturating_sub(2) as usize;
-            let tail: String = text
-                .lines()
-                .rev()
-                .take(inner_height.max(1))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n");
 
             // No .wrap(): tmux already wrapped this text at the tile's width (see
             // sync_window_sizes), so re-wrapping only doubles up lines and throws off
             // the tail count above. Anything still too long gets clipped, which is what
             // a terminal would do anyway.
-            let para = Paragraph::new(tail).style(text_style).block(block);
+            let para = Paragraph::new(tail(&text, inner_height))
+                .style(text_style)
+                .block(block);
             f.render_widget(para, col_areas[col_idx]);
         }
     }
+}
+
+/// Phone-shaped dashboard: every session as one row in a list, and the selected one's
+/// live output filling the rest of the screen. Same keys as the grid — Up/Down move,
+/// Enter attaches — which is why this sets `cols` to 1.
+fn draw_list_view(f: &mut Frame, area: Rect, state: &mut AppState) {
+    state.cols = 1;
+    let (list_area, preview_area) = list_split(state.tiles.len(), area);
+    let highlight = if state.light_bg { Color::Blue } else { Color::Yellow };
+
+    // Scroll so the selection stays on screen when there are more sessions than rows.
+    let visible = list_area.height.saturating_sub(2) as usize;
+    let first = state.selected.saturating_sub(visible.saturating_sub(1));
+    let rows: Vec<Line> = state
+        .tiles
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible.max(1))
+        .map(|(idx, tile)| {
+            let selected = idx == state.selected;
+            let style = if selected {
+                Style::default().fg(highlight).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let marker = if selected { '>' } else { ' ' };
+            let suffix = if tile.running { "" } else { " (stopped)" };
+            Line::styled(format!("{marker} {}{suffix}", tile.name), style)
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(rows).block(
+            Block::default()
+                .title(format!(" sessions ({}) ", state.tiles.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        ),
+        list_area,
+    );
+
+    let Some(tile) = state.tiles.get(state.selected) else {
+        return;
+    };
+    let text = if tile.running {
+        state.panes.get(&tile.name).cloned().unwrap_or_default()
+    } else {
+        "no tmux session — press Enter to restart the agent here".to_string()
+    };
+    let block = Block::default()
+        .title(format!(" {} ", tile.name))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(highlight).add_modifier(Modifier::BOLD));
+    let inner_height = preview_area.height.saturating_sub(2) as usize;
+    f.render_widget(
+        Paragraph::new(tail(&text, inner_height)).block(block),
+        preview_area,
+    );
 }
 
 
@@ -489,6 +598,65 @@ mod tests {
 
     fn area(w: u16, h: u16) -> Rect {
         Rect::new(0, 0, w, h)
+    }
+
+    /// iPhone 15 Pro in Blink, portrait: roughly 40x50. Nothing legible fits as a grid.
+    const PHONE: (u16, u16) = (40, 50);
+
+    #[test]
+    fn phone_screen_uses_the_list_view() {
+        assert!(use_list_view(5, area(PHONE.0, PHONE.1)));
+        assert!(use_list_view(1, area(PHONE.0, PHONE.1)));
+    }
+
+    #[test]
+    fn desktop_screen_keeps_the_grid() {
+        assert!(!use_list_view(5, area(300, 80)));
+        assert!(!use_list_view(1, area(132, 50)));
+    }
+
+    #[test]
+    fn too_many_sessions_for_the_screen_falls_back_to_the_list() {
+        // 20 sessions on a laptop: any grid puts them below the legibility floor.
+        assert!(use_list_view(20, area(132, 50)));
+    }
+
+    #[test]
+    fn empty_dashboard_is_not_list_view() {
+        // Guards the n == 0 path — pick_cols would divide by zero rows otherwise.
+        assert!(!use_list_view(0, area(PHONE.0, PHONE.1)));
+    }
+
+    #[test]
+    fn list_split_leaves_the_preview_the_larger_half() {
+        let (list, preview) = list_split(5, area(PHONE.0, PHONE.1));
+        assert_eq!(list.height, 7); // 5 sessions + 2 borders
+        assert_eq!(preview.height, PHONE.1 - 7);
+        assert!(preview.height > list.height);
+    }
+
+    #[test]
+    fn list_split_caps_the_list_at_half_the_screen() {
+        // 40 sessions cannot take the whole screen and leave nothing to preview.
+        let (list, preview) = list_split(40, area(PHONE.0, PHONE.1));
+        assert_eq!(list.height, PHONE.1 / 2);
+        assert_eq!(preview.height, PHONE.1 - PHONE.1 / 2);
+    }
+
+    #[test]
+    fn list_split_survives_a_screen_too_short_to_split() {
+        let (list, preview) = list_split(3, area(40, 3));
+        assert_eq!(list.height, 3);
+        assert_eq!(preview.height, 0);
+    }
+
+    #[test]
+    fn tail_keeps_the_last_lines_in_order() {
+        assert_eq!(tail("a\nb\nc\nd", 2), "c\nd");
+        assert_eq!(tail("a\nb", 10), "a\nb");
+        assert_eq!(tail("", 3), "");
+        // A zero-height tile still asks for one line rather than panicking.
+        assert_eq!(tail("a\nb\nc", 0), "c");
     }
 
     #[test]

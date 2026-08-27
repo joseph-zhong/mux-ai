@@ -7,6 +7,10 @@ use std::process::{Command, Stdio};
 /// detach key (C-\) server-wide without touching ~/.tmux.conf.
 const SOCKET: &str = "muxai";
 const DETACH_KEY: &str = "C-\\";
+/// Phone soft keyboards have no Ctrl of their own — iOS/Android terminal apps put one on
+/// an accessory row, so C-\ costs two taps there. F12 is one tap and collides with
+/// nothing the agents use.
+const DETACH_KEY_ALT: &str = "F12";
 
 fn tmux() -> Command {
     let mut cmd = Command::new("tmux");
@@ -38,9 +42,10 @@ pub fn ensure_server() -> Result<()> {
     Ok(())
 }
 
-/// -n binds with no prefix key, so C-\ detaches directly from inside any session.
+/// -n binds with no prefix key, so C-\ (or F12) detaches directly from inside any session.
 fn bind_detach_key() -> Result<()> {
     run_ok(tmux().args(["bind-key", "-n", DETACH_KEY, "detach-client"]))?;
+    run_ok(tmux().args(["bind-key", "-n", DETACH_KEY_ALT, "detach-client"]))?;
     Ok(())
 }
 
@@ -51,8 +56,8 @@ fn bind_detach_key() -> Result<()> {
 fn configure_status_bar() -> Result<()> {
     // status-left-length defaults to 10, which truncates our hint before the
     // session name even starts rendering.
-    run_ok(tmux().args(["set-option", "-g", "status-left-length", "40"]))?;
-    run_ok(tmux().args(["set-option", "-g", "status-left", " ctrl-\\ to return to dashboard  [#S] "]))?;
+    run_ok(tmux().args(["set-option", "-g", "status-left-length", "48"]))?;
+    run_ok(tmux().args(["set-option", "-g", "status-left", " ctrl-\\ or F12 to return to dashboard  [#S] "]))?;
     Ok(())
 }
 
