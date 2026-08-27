@@ -3,8 +3,13 @@
 Grid-dashboard TUI for running several coding agents in parallel, each in its own git
 worktree, on top of tmux. See [`DESIGN.md`](DESIGN.md) for the architecture and
 [`ALTERNATIVES.md`](ALTERNATIVES.md) for why this exists instead of just using aoe /
-Claude Squad / etc. To reach your sessions from a phone, see
-[`PHONE_ACCESS.md`](PHONE_ACCESS.md).
+Claude Squad / etc.
+
+**No daemon, no server, no port.** Session state lives in the tmux server, not in the
+`muxai` process — every invocation is a short-lived client. So there is nothing here to
+expose and nothing here to authenticate. Reaching your agents from a phone is your
+operating system's SSH over a WireGuard mesh, not a web UI behind a shared password:
+see [`PHONE_ACCESS.md`](PHONE_ACCESS.md).
 
 ## Install & demo
 
@@ -90,3 +95,7 @@ See [`FUTURE.md`](FUTURE.md) — live control-mode streaming, a sandboxed/remote
 merged-branch-aware `reset`, cache-env auto-injection on session creation, a config
 file, multi-repo dashboard filtering, and open-model agent presets. Not yet filed as
 GitHub issues (this repo has no remote / `gh` isn't authenticated on this machine yet).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

@@ -21,12 +21,23 @@ in the `muxai` process, which is a fresh short-lived client on every invocation 
 [`DESIGN.md`](DESIGN.md)). So "access from phone" does not require building an HTTP API,
 a daemon, or a web UI. It requires getting a terminal onto the phone.
 
+The consequence worth stating plainly: **mux-ai has no listening port, no server process,
+and no authentication of its own.** There is nothing in this project to expose, so there
+is nothing in this project to secure. Remote access is your operating system's SSH, and
+the security review is the one every Unix admin already knows how to do.
+
 That is also why mux-ai should *not* copy the OpenCode / OpenChamber architecture. Those
 tools need a client/server protocol because their agent state lives inside their own
-process. Ours lives in tmux. Their remote-access auth story (HTTP basic auth via
-`OPENCODE_SERVER_PASSWORD`; a UI password plus a revocable tunnel link) is also weaker
-than an identity-based WireGuard mesh — and OpenCode's own docs recommend Tailscale over
-opening a port anyway.
+process. Once you have a server, you need an auth story for it, and theirs is weaker than
+an identity-based WireGuard mesh — HTTP basic auth via `OPENCODE_SERVER_PASSWORD`, or a UI
+password plus a revocable tunnel link. Note that OpenCode's own docs recommend putting
+Tailscale in front rather than opening a port. Tailscale is not the differentiator; anyone
+can put Tailscale in front of anything. The differentiator is having no server that would
+tempt you to skip it.
+
+Note that mux-ai contains **zero Tailscale code** and has no dependency on it. Tailscale
+here is a deployment recommendation, not an integration. Any other way of getting SSH to
+your machine — a VPN you already run, a jump host, a LAN you trust — works identically.
 
 ## What this precisely enables
 
@@ -46,7 +57,7 @@ After setup, from a phone on cellular data or any foreign Wi-Fi:
 What it explicitly does **not** enable:
 
 - No browser access (that is Tier 1 — `ttyd`).
-- No public URL on `example.com` (that is Tier 2).
+- No public URL on a domain you own (that is Tier 2).
 - No push notifications when an agent finishes or blocks on a prompt.
 - No access for anyone but you — a tailnet is single-account by default.
 - No file editing UI. You get a terminal; use the agent, or `vim`.
@@ -66,123 +77,74 @@ skipping the app install, e.g. on a borrowed device. For your own phone, the nat
 better: real key handling, saved hosts and keys, working scrollback, and reconnect on
 network change.
 
-## Current state of this machine (verified 2026-08-19)
+## Before you start
 
-| Thing | State |
-|---|---|
-| Tailnet name | `your-mac.tailnet-name.ts.net` (`100.100.0.1`) |
-| MagicDNS | Enabled |
-| Devices in tailnet | 4 — desktop, `your-phone`, `other-host`, `your-mac-2` |
-| Phone enrolled | **Yes** — `your-phone` (`100.100.0.2`) |
-| macOS Remote Login (sshd) | **Off** — nothing is listening on port 22 |
-| `~/.ssh/authorized_keys` | Does not exist |
-| Tailscale install | **Two of them.** See below |
+You need, on the desktop running the agents:
 
-So Step 1 is already done. What is missing: resolve the dual install, then turn on sshd
-with key-only auth (Steps 2–5).
+- A [Tailscale](https://tailscale.com) account with this machine enrolled, and MagicDNS
+  enabled (Tailscale admin console → DNS → MagicDNS). Check with `tailscale status`.
+- macOS with Remote Login available. Linux works too; the sshd hardening in Step 3 is
+  portable, only the Remote Login toggle in Step 4 is macOS-specific.
 
-### The dual install — read this before anything else
+Take note of your tailnet name — `tailscale status --json | grep -i magicdnssuffix`, or
+the machine list in the admin console. It looks like `tailXXXXXX.ts.net`, and your
+desktop's full name is `<machine>.<tailnet>.ts.net`. Everywhere below that appears as
+`<user>@<machine>.<tailnet>.ts.net`, substitute your own.
 
-This machine has **two** Tailscale installs, and only one of them is doing anything:
+### Check which Tailscale you have installed — it changes your options
 
-| Install | Version | State |
+macOS has two Tailscale distributions and they are not equivalent:
+
+| Install | What it is | Tailscale SSH server |
 |---|---|---|
-| macOS app, `/Applications/Tailscale.app` (`macsys` variant) | 1.102.2 | **Live.** Owns `/var/run/tailscaled.socket`, is the node the tailnet sees |
-| Homebrew `tailscale` formula | 1.98.10 | **Inert.** `tailscaled` is running as root (started 2026-08-10) but has no state directory, so it never registered as a node |
+| `/Applications/Tailscale.app` (App Store or `macsys` variant) | Menu bar app, auto-updates, no sudo | **Not supported** |
+| Homebrew `tailscale` formula | The open source `tailscale`/`tailscaled` build | **Supported** |
 
-Evidence: the Homebrew daemon is running —
+This matters because `tailscale set --ssh` — which is a genuinely better auth story, since
+it needs no `authorized_keys`, no key distribution, and listens only on the tailnet
+interface rather than on every interface — only works on Linux and on the open source
+macOS build. **This doc uses macOS's built-in OpenSSH instead, so it works with either
+install.** Connecting *from* the phone works from any Tailscale client on any platform.
 
-```sh
-ps aux | grep 'tailscale[d]'
-# root  35671  ...  /opt/homebrew/opt/tailscale/bin/tailscaled
-```
+If you want Tailscale SSH on a Mac, the path is to run the Homebrew daemon as the real
+node (`sudo brew services start tailscale`, `tailscale up --ssh`) and add an SSH rule to
+your tailnet ACL — at the cost of re-registering the node and losing the menu bar app.
 
-— but it has no state anywhere (`/opt/homebrew/var/lib/tailscale/` and
-`/var/lib/tailscale/` both do not exist), and whatever answers on the shared socket
-reports the *app's* version, not Homebrew's:
-
-```sh
-/opt/homebrew/bin/tailscale status | head -1
-# Warning: client version "1.98.10-..." != tailscaled server version "1.102.2-..."
-```
-
-Both CLIs on `PATH` therefore report the same node. `/usr/local/bin/tailscale` (a shim
-that execs the app's binary) shadows `/opt/homebrew/bin/tailscale`, so `tailscale`
-resolves to the app's CLI:
+**If you have both installed**, only one is actually serving your tailnet, and the other
+is dead weight — a root process doing nothing, confusing `brew services` / `launchctl`
+output, version-skew warnings, and often a duplicate node in your tailnet. Diagnose it:
 
 ```sh
-which -a tailscale
-# /usr/local/bin/tailscale
-# /opt/homebrew/bin/tailscale
+ps aux | grep 'tailscale[d]'          # which daemons are running
+which -a tailscale                    # which CLI wins on PATH
+tailscale status | head -1            # a version-skew warning means the CLI is not the daemon
 ```
 
-Practical consequences: a root process doing nothing, confusing `brew services` /
-`launchctl` output, version-skew warnings on every Homebrew-CLI invocation, and most
-likely the duplicate `your-mac-2` node in the tailnet.
-
-**Recommended: keep the app, drop the Homebrew daemon** (Step 0 below). The app is the
-better fit for a desktop Mac — menu bar UI, auto-updates, no sudo, clean start at login —
-and it is already the one working.
-
-### Consequence: Tailscale SSH is not available as currently installed
-
-`tailscale set --ssh` will not work here. Tailscale's SSH *server* component only runs on
-Linux and on the macOS **open source** `tailscale`/`tailscaled` build. You *have* that
-build installed via Homebrew, but it is not the daemon serving your tailnet — the app is,
-and the app cannot be a Tailscale SSH server. So this doc uses macOS's built-in OpenSSH
-(Remote Login). Connecting *from* the phone works from any Tailscale client regardless of
-platform.
-
-If you would rather have Tailscale SSH — which is genuinely a better auth story, since it
-needs no `authorized_keys`, no key distribution, and listens only on the tailnet interface
-rather than on every interface — the path is to go the other way: quit and uninstall the
-app, then run the Homebrew daemon as the real node (`sudo brew services start tailscale`,
-`tailscale up --ssh`), and add an SSH rule to the tailnet ACL. That means re-registering
-this node and losing the menu bar app, so it is not the default recommendation here — and
-it would disturb the separate use-case the phone is already set up for.
+A Homebrew `tailscaled` with no state directory (neither `/opt/homebrew/var/lib/tailscale/`
+nor `/var/lib/tailscale/` exists) never registered as a node and is doing nothing. Drop it
+with `sudo brew services stop tailscale`, then delete any stale duplicate node in the
+[admin console](https://login.tailscale.com/admin/machines) so MagicDNS cannot route your
+machine's name to a dead registration.
 
 ---
 
 ## Setup
 
-### Step 0 — Drop the inert Homebrew daemon
+### Step 1 — Enroll the phone in the tailnet
+
+Install Tailscale from the
+[iOS App Store](https://apps.apple.com/us/app/tailscale/id1470499037) or
+[Google Play](https://play.google.com/store/apps/details?id=com.tailscale.ipn), sign in
+with the **same account** as the desktop, toggle the VPN on, and accept the OS
+VPN-configuration prompt.
+
+Confirm from the desktop that the phone shows up:
 
 ```sh
-sudo brew services stop tailscale
-brew uninstall tailscale
-```
-
-Verify nothing is left running and the app is still the live node:
-
-```sh
-ps aux | grep 'tailscale[d]' || echo "no tailscaled — expected"
 tailscale status
 ```
 
-Then delete the stale `your-mac-2` node in the
-[admin console](https://login.tailscale.com/admin/machines), so MagicDNS cannot route
-`your-mac` to a dead registration.
-
-If you want to keep the Homebrew binary for its CLI, `sudo brew services stop tailscale`
-alone is enough — the daemon is the problem, not the binary. Expect the version-skew
-warning to persist whenever you invoke `/opt/homebrew/bin/tailscale` directly.
-
-### Step 1 — Enroll the phone in the tailnet ✅ done
-
-Already complete — `your-phone` (`100.100.0.2`) is in the tailnet. Confirm any time
-with:
-
-```sh
-tailscale status | grep iphone
-```
-
-For reference, if you ever add another device: install Tailscale from the
-[iOS App Store](https://apps.apple.com/us/app/tailscale/id1470499037) or
-[Google Play](https://play.google.com/store/apps/details?id=com.tailscale.ipn), sign in
-with the **same account** as the desktop (`you@example.com`), toggle the VPN
-on, and accept the OS VPN-configuration prompt.
-
-### Step 2 — Generate an SSH key on the phone
+### Step 2 — Generate an SSH key on the phone, and install it on the desktop
 
 **MANUAL VERIFICATION REQUIRED** (phone-side).
 
@@ -194,11 +156,7 @@ Use a terminal app that supports SSH keys and a hardware-ish keyboard row:
   `ssh-keygen -t ed25519`, then `cat ~/.ssh/id_ed25519.pub`.
 
 Get that **public** key text onto the desktop (AirDrop, a note, a paste buffer — it is
-public, it is not sensitive).
-
-### Step 3 — Install the phone's public key on the desktop
-
-Run on the desktop, substituting the real key:
+public, it is not sensitive), then run on the desktop, substituting the real key:
 
 ```sh
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -212,9 +170,9 @@ Verify:
 wc -l ~/.ssh/authorized_keys && ssh-keygen -l -f ~/.ssh/authorized_keys
 ```
 
-### Step 4 — Harden sshd before turning it on
+### Step 3 — Harden sshd before turning it on
 
-Do this **before** Step 5, so sshd is never briefly listening with password auth enabled.
+Do this **before** Step 4, so sshd is never briefly listening with password auth enabled.
 
 ```sh
 sudo tee /etc/ssh/sshd_config.d/200-muxai-phone.conf >/dev/null <<'EOF'
@@ -229,11 +187,12 @@ sudo chmod 644 /etc/ssh/sshd_config.d/200-muxai-phone.conf
 sudo sshd -t && echo "sshd config OK"
 ```
 
-`/etc/ssh/sshd_config` line 19 is `Include /etc/ssh/sshd_config.d/*`, so this drop-in is
-picked up automatically. `sshd -t` must print `sshd config OK` with no other output before
-you continue.
+Replace `YOUR_USERNAME` with the output of `whoami`. macOS's `/etc/ssh/sshd_config`
+contains `Include /etc/ssh/sshd_config.d/*`, so this drop-in is picked up automatically —
+confirm with `grep -n '^Include' /etc/ssh/sshd_config` if you want to be sure. `sshd -t`
+must print `sshd config OK` with no other output before you continue.
 
-### Step 5 — Enable Remote Login
+### Step 4 — Enable Remote Login
 
 ```sh
 sudo systemsetup -setremotelogin on
@@ -243,7 +202,7 @@ sudo systemsetup -getremotelogin
 Then restrict it to your user in the GUI as a second layer:
 
 **MANUAL VERIFICATION REQUIRED**: System Settings → General → Sharing → Remote Login →
-`(i)` → set **"Allow access for: Only these users"** → `YOUR_USERNAME`.
+`(i)` → set **"Allow access for: Only these users"** → your user.
 
 Verify it is listening:
 
@@ -251,21 +210,21 @@ Verify it is listening:
 nc -z -G 2 localhost 22 && echo "sshd LISTENING" || echo "sshd NOT listening"
 ```
 
-### Step 6 — Connect from the phone
+### Step 5 — Connect from the phone
 
 **MANUAL VERIFICATION REQUIRED** (phone-side):
 
 ```sh
-ssh YOUR_USERNAME@your-mac.tailnet-name.ts.net
+ssh <user>@<machine>.<tailnet>.ts.net
 muxai
 ```
 
-The short MagicDNS name `your-mac` also works while the phone's Tailscale VPN is
-on. Use the full name if you hit resolver weirdness on cellular.
+The short MagicDNS name `<machine>` also works while the phone's Tailscale VPN is on. Use
+the full name if you hit resolver weirdness on cellular.
 
 ---
 
-## Security model — read this before running Step 5
+## Security model — read this before running Step 4
 
 Being precise about what each piece does and does not protect, because it is easy to
 believe this setup is more isolated than it is:
@@ -277,8 +236,8 @@ believe this setup is more isolated than it is:
   tailnet. This is not fixable via `ListenAddress`: macOS runs sshd through launchd socket
   activation (`SockServiceName ssh` in `/System/Library/LaunchDaemons/ssh.plist`), and
   launchd owns the socket, so `sshd_config`'s `ListenAddress` has no effect on it.
-- **Therefore the real access control is Step 4**: public-key-only authentication, no
-  passwords, no root, one permitted user. Do not skip it or reorder it after Step 5.
+- **Therefore the real access control is Step 3**: public-key-only authentication, no
+  passwords, no root, one permitted user. Do not skip it or reorder it after Step 4.
 - **Nothing here is reachable from the public internet** as long as your router does not
   forward port 22. It does not by default. If you have ever set up port forwarding on this
   network, verify it does not include 22 before enabling Remote Login.
