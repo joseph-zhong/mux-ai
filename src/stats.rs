@@ -10,7 +10,14 @@ use crate::{tmux, worktree};
 /// Directories that toolchains regenerate per-worktree instead of sharing through a
 /// global cache. These are exactly what `reset` is allowed to delete — see
 /// DESIGN.md's "global-buck-clone" table for which toolchains already share instead.
-const RECLAIMABLE_DIRS: &[&str] = &["target", "node_modules", ".venv", "dist", ".next", "__pycache__"];
+const RECLAIMABLE_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    ".venv",
+    "dist",
+    ".next",
+    "__pycache__",
+];
 
 pub struct WorktreeUsage {
     pub name: String,
@@ -44,10 +51,7 @@ fn du_kb(path: &Path) -> u64 {
 
 fn worktree_breakdown(path: &Path) -> (u64, u64) {
     let total = du_kb(path);
-    let reclaimable: u64 = RECLAIMABLE_DIRS
-        .iter()
-        .map(|d| du_kb(&path.join(d)))
-        .sum();
+    let reclaimable: u64 = RECLAIMABLE_DIRS.iter().map(|d| du_kb(&path.join(d))).sum();
     (total, reclaimable)
 }
 
@@ -59,7 +63,10 @@ fn shared_cache_sizes() -> Vec<(String, u64)> {
         let candidates = [
             ("uv cache", home.join(".cache/uv")),
             ("cargo registry", home.join(".cargo/registry")),
-            ("pnpm store (linux-style)", home.join(".local/share/pnpm/store")),
+            (
+                "pnpm store (linux-style)",
+                home.join(".local/share/pnpm/store"),
+            ),
             ("pnpm store (macOS)", home.join("Library/pnpm/store")),
         ];
         for (label, path) in candidates {
@@ -168,7 +175,11 @@ pub fn reset(store: &mut SessionStore, yes: bool) -> Result<Vec<String>> {
                 continue;
             }
             std::fs::remove_dir_all(&target).ok();
-            log.push(format!("removed {} ({})", target.display(), format_kb(size_kb)));
+            log.push(format!(
+                "removed {} ({})",
+                target.display(),
+                format_kb(size_kb)
+            ));
         }
     }
 

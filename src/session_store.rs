@@ -42,8 +42,7 @@ impl SessionStore {
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let data = serde_json::to_string_pretty(&self.sessions)?;
         fs::write(&self.path, data)

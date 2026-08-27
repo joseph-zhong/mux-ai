@@ -2,7 +2,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "muxai", version, about = "Grid-dashboard TUI for parallel coding agents across git worktrees")]
+#[command(
+    name = "muxai",
+    version,
+    about = "Grid-dashboard TUI for parallel coding agents across git worktrees"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

@@ -34,10 +34,7 @@ pub fn find_repo_root(start: &Path) -> Result<PathBuf> {
         .output()
         .context("running git rev-parse")?;
     if !out.status.success() {
-        bail!(
-            "{} is not inside a git repository",
-            start.display()
-        );
+        bail!("{} is not inside a git repository", start.display());
     }
     // <root>/.git -> <root>
     let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
@@ -91,8 +88,7 @@ fn ensure_gitignored(repo_root: &Path) -> Result<()> {
     }
     updated.push_str(entry);
     updated.push('\n');
-    fs::write(&gitignore, updated)
-        .with_context(|| format!("writing {}", gitignore.display()))?;
+    fs::write(&gitignore, updated).with_context(|| format!("writing {}", gitignore.display()))?;
     Ok(())
 }
 
@@ -106,24 +102,13 @@ pub fn create(repo_root: &Path, name: &str, branch: &str) -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    run_ok(git(repo_root).args([
-        "worktree",
-        "add",
-        "-b",
-        branch,
-        &path.to_string_lossy(),
-    ]))?;
+    run_ok(git(repo_root).args(["worktree", "add", "-b", branch, &path.to_string_lossy()]))?;
     Ok(path)
 }
 
 pub fn remove(repo_root: &Path, path: &Path) -> Result<()> {
     if path.exists() {
-        run_ok(git(repo_root).args([
-            "worktree",
-            "remove",
-            "--force",
-            &path.to_string_lossy(),
-        ]))?;
+        run_ok(git(repo_root).args(["worktree", "remove", "--force", &path.to_string_lossy()]))?;
     }
     Ok(())
 }
@@ -167,8 +152,15 @@ mod tests {
         create(&repo, "beta", "beta").unwrap();
         // A worktree outside .muxai/worktrees belongs to the user, not to muxai.
         let outside = repo.join("elsewhere");
-        run_ok(git(&repo).args(["worktree", "add", "-q", "-b", "other", &outside.to_string_lossy()]))
-            .unwrap();
+        run_ok(git(&repo).args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            &outside.to_string_lossy(),
+        ]))
+        .unwrap();
 
         let mut names: Vec<String> = list(&repo).unwrap().into_iter().map(|w| w.name).collect();
         names.sort();
