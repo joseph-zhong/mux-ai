@@ -9,14 +9,22 @@ on:
         description: 'Tag to build and release (e.g. v0.1.0)'
         required: true
 
+# Two tags pushed close together must not race for the same release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
+  # Provenance attestation, so a downloaded binary can be traced to this workflow.
+  id-token: write
+  attestations: write
 
 jobs:
   macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -36,7 +44,12 @@ jobs:
       - name: Add targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # Nothing else between here and publishing gates correctness, so a red test
+      # would otherwise ship.
+      - name: Test
+        run: cargo test --locked
 
       - name: Build both architectures
         run: |
@@ -53,6 +66,14 @@ jobs:
           lipo -info dist/muxai
           codesign --sign - --force dist/muxai
 
+      # The fused, stripped, signed binary is what users run. Confirm it starts and
+      # reports the version this tag claims, before it is packaged.
+      - name: Smoke test the artifact
+        run: |
+          got=$(./dist/muxai --version)
+          echo "$got"
+          [ "$got" = "muxai ${{ steps.version.outputs.version }}" ]
+
       - name: Package
         id: package
         run: |
@@ -61,6 +82,11 @@ jobs:
           shasum -a 256 "$asset" > "$asset.sha256"
           cat "$asset.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: ${{ steps.package.outputs.asset }}
 
       - name: Publish release
         env:

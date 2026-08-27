@@ -63,10 +63,7 @@ fn shared_cache_sizes() -> Vec<(String, u64)> {
         let candidates = [
             ("uv cache", home.join(".cache/uv")),
             ("cargo registry", home.join(".cargo/registry")),
-            (
-                "pnpm store (linux-style)",
-                home.join(".local/share/pnpm/store"),
-            ),
+            ("pnpm store (XDG)", home.join(".local/share/pnpm/store")),
             ("pnpm store (macOS)", home.join("Library/pnpm/store")),
         ];
         for (label, path) in candidates {

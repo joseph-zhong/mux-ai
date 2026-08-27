@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+  # Actions are pinned to SHAs, which means no automatic upgrades - this is what
+  # moves them forward instead.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

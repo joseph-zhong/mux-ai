@@ -1,5 +1,7 @@
 # mux-ai
 
+[![ci](https://github.com/joseph-zhong/mux-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/joseph-zhong/mux-ai/actions/workflows/ci.yml)
+
 Grid-dashboard TUI for running several coding agents in parallel, each in its own git
 worktree, on top of tmux. See [`DESIGN.md`](DESIGN.md) for the architecture and
 [`ALTERNATIVES.md`](ALTERNATIVES.md) for why this exists instead of just using aoe /
@@ -32,13 +34,23 @@ GitHub CLI — so recipients need `brew install gh`, `gh auth login`, and read a
 the repo. Once the repo is public the one-liner works unauthenticated, with no script
 change.
 
-**From source (any platform).** Needs Rust stable via [rustup](https://rustup.rs):
+**From source.** Needs Rust stable via [rustup](https://rustup.rs):
 
 ```sh
 cargo install --git https://github.com/joseph-zhong/mux-ai   # from anywhere
 cargo install --path .                                       # from a clone
 cargo build --release                                        # or just build it
 ```
+
+**Verifying what you downloaded.** Every release asset is built by
+`.github/workflows/release.yml` and carries a signed provenance attestation, so you can
+confirm the binary came from this repo's workflow and not from someone else:
+
+```sh
+gh attestation verify muxai-v0.1.0-macos-universal.tar.gz --repo joseph-zhong/mux-ai
+```
+
+The `.sha256` published alongside it covers integrity; the attestation covers origin.
 
 **If macOS refuses to open the binary.** Downloading the tarball in a browser tags it
 with a quarantine flag, and these binaries are ad-hoc signed rather than notarized, so
@@ -89,8 +101,7 @@ process that shells out to `tmux`/`git` and reads/writes the store.
   prebuilt binary needs no toolchain. No MSRV pinned yet.
 - Crate dependencies (ratatui, crossterm, clap, sysinfo, serde, chrono, dirs) are
   pulled by Cargo — nothing else to install manually.
-- Developed and tested on **macOS**. Should work on Linux (nothing macOS-specific in
-  the code path) but that's untested.
+- **macOS only.** Not built, tested, or supported anywhere else.
 
 ## Known gotchas & trade-offs
 
@@ -126,6 +137,16 @@ See [`FUTURE.md`](FUTURE.md) — live control-mode streaming, a sandboxed/remote
 merged-branch-aware `reset`, cache-env auto-injection on session creation, a config
 file, multi-repo dashboard filtering, and open-model agent presets. Not yet filed as
 GitHub issues.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`:
+`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, a release build, and a
+smoke test that the built binary starts, on macOS.
+
+Actions are pinned to commit SHAs rather than tags, since both workflows can write to
+the repo and one publishes binaries people download. Dependabot moves those pins, and
+the crate dependencies, on a monthly schedule.
 
 ## Releasing
 
