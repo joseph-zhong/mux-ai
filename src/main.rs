@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    tmux::ensure_available()?;
     match cli.command.unwrap_or(Command::Dashboard) {
         Command::Dashboard => ui::dashboard::run(),
         Command::New {
