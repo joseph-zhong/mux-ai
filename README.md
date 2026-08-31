@@ -67,17 +67,38 @@ From inside any git repo:
 
 ```sh
 muxai new demo -- 'echo hello from demo; sleep 300'   # worktree + tmux session
-muxai new demo2 -- claude                              # a second one, running claude
+muxai new demo2                                        # a second one, running claude
+muxai new demo3 --agent codex                          # a third, running codex
 
 muxai                # opens the grid dashboard
 # arrow keys: move selection    Enter: attach into the session
 # C-q (inside a session): detach back to the dashboard
-# n: new session   k: kill selected   q: quit (only place quit exists)
+# n: new session (pick the agent, then name it)   k: kill selected   q: quit
 
 muxai status         # disk (shared cache vs. reclaimable) + memory, across all sessions
 muxai reset          # dry run — shows what it would reclaim
 muxai reset --yes    # actually reclaims it
 ```
+
+## Agents
+
+A session is just a command in a tmux pane, so any agent CLI works. Presets give the
+ones you actually run a name, and tag the dashboard tile so a mixed grid stays readable:
+
+| Preset | Runs |
+|---|---|
+| `claude` (default) | `claude` |
+| `codex` | `codex` |
+
+The dashboard's `n` asks which agent before it asks for a name, and only offers the ones
+installed — so with a single agent on `PATH` it goes straight to the name, and with
+several nothing silently defaults. `muxai new --agent <preset>` is the same choice from
+the command line, and fails up front if that preset's CLI isn't installed.
+
+An explicit `-- <command...>` still wins over the preset, and is tagged `custom`. Presets
+live in [`src/agent.rs`](src/agent.rs); the fuller backend story — provider failover,
+open-model and local rungs — is in
+[`plans/investigation/local-agent-fallback.md`](plans/investigation/local-agent-fallback.md).
 
 ## Dev / local run
 
@@ -88,7 +109,8 @@ cargo build                  # debug build, faster compiles
 ```
 
 Module layout: `tmux.rs` (dedicated-socket tmux wrapper), `worktree.rs` (git worktree
-lifecycle), `session_store.rs` (JSON state file), `stats.rs` (disk/memory accounting),
+lifecycle), `agent.rs` (agent presets), `session_store.rs` (JSON state file),
+`stats.rs` (disk/memory accounting),
 `ui/dashboard.rs` (the ratatui grid), `main.rs` (CLI dispatch + `create_session`, shared
 by `muxai new` and the dashboard's `n` key). No daemon — every invocation is a fresh
 process that shells out to `tmux`/`git` and reads/writes the store.
