@@ -231,6 +231,8 @@ fn event_loop(
                                         }
                                     }
                                 }
+                                // The pushed tile size outlives the attach.
+                                let _ = tmux::follow_client(&name);
                                 disable_raw_mode()?;
                                 execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                                 let attach_result = tmux::attach(&name);
@@ -379,10 +381,20 @@ fn sync_window_sizes(state: &mut AppState, area: Rect) {
     if inner_w == 0 || inner_h == 0 {
         return;
     }
+    // Resizing a session someone is attached to shrinks it under them, leaving tmux's
+    // dotted background round the edge. Forgetting the pushed size re-tiles on detach.
+    let attached = tmux::attached_sessions().unwrap_or_default();
+    for name in &attached {
+        state.sizes.remove(name);
+    }
     let stale: Vec<String> = state
         .tiles
         .iter()
-        .filter(|t| t.running && state.sizes.get(&t.name) != Some(&(inner_w, inner_h)))
+        .filter(|t| {
+            t.running
+                && !attached.contains(&t.name)
+                && state.sizes.get(&t.name) != Some(&(inner_w, inner_h))
+        })
         .map(|t| t.name.clone())
         .collect();
     for name in stale {
