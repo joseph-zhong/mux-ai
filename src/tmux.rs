@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -15,7 +15,7 @@ fn tmux() -> Command {
 }
 
 fn run_ok(cmd: &mut Command) -> Result<String> {
-    let out = cmd.output()?;
+    let out = cmd.output().with_context(|| format!("running {cmd:?}"))?;
     if !out.status.success() {
         bail!(
             "{:?} failed: {}",
@@ -24,6 +24,22 @@ fn run_ok(cmd: &mut Command) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Every command shells out to tmux, and the failures are deliberately swallowed
+/// throughout (a dead server is normal). Without this check a machine with no tmux
+/// installed gets an empty dashboard, or a bare `No such file or directory (os error 2)`
+/// from `muxai new`, neither of which names tmux.
+pub fn ensure_available() -> Result<()> {
+    match Command::new("tmux").arg("-V").output() {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "tmux is not installed or not on PATH — muxai runs every agent session inside it.\n  \
+             macOS:  brew install tmux\n  \
+             Debian: sudo apt install tmux"
+        ),
+        Err(e) => Err(e).context("running tmux -V"),
+    }
 }
 
 /// Best-effort: starts the dedicated server and applies our keybind. tmux's
