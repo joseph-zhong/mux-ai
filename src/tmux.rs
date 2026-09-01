@@ -86,10 +86,10 @@ fn configure_status_bar() -> Result<()> {
 /// `resize-window` also marks the window *permanently* manually-sized — flipping the
 /// `window-size` option back is not enough to undo it, which is why attaching used to
 /// leave the session stuck inside a tile-sized box in the corner of the terminal. The
-/// two hooks are the undo: on attach, and on every later terminal resize, `-A` snaps
-/// the window to the attached client. They only fire when a client exists, i.e. only
-/// while someone is attached — the dashboard itself is not a tmux client, so tile
-/// sizing is untouched.
+/// two hooks undo it for attaches made outside the dashboard: on attach, and on every
+/// later terminal resize, `-A` snaps the window to the attached client. They only fire
+/// when a client exists, i.e. only while someone is attached — the dashboard itself is
+/// not a tmux client, so tile sizing is untouched.
 fn configure_window_sizing() -> Result<()> {
     run_ok(tmux().args(["set-option", "-g", "window-size", "manual"]))?;
     run_ok(tmux().args(["set-hook", "-g", "client-attached", "resize-window -A"]))?;
@@ -103,6 +103,13 @@ fn configure_window_sizing() -> Result<()> {
 /// only fails later, on every attach and kill, so names are normalised up front.
 pub fn sanitize_name(name: &str) -> String {
     name.replace(['.', ':'], "-")
+}
+
+/// Hand a window's sizing back to whoever attaches to it. `resize_window` leaves
+/// `window-size` at `manual`, which outlives the attach.
+pub fn follow_client(name: &str) -> Result<()> {
+    run_ok(tmux().args(["set-option", "-w", "-t", name, "window-size", "latest"]))?;
+    Ok(())
 }
 
 pub fn resize_window(name: &str, width: u16, height: u16) -> Result<()> {
@@ -150,6 +157,29 @@ pub fn list_sessions_with_paths() -> Result<Vec<(String, PathBuf)>> {
         .filter_map(|l| l.split_once('\t'))
         .map(|(name, path)| (name.to_string(), PathBuf::from(path)))
         .collect())
+}
+
+/// Sessions with at least one client attached.
+pub fn attached_sessions() -> Result<Vec<String>> {
+    let out = tmux()
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_attached}\t#{session_name}",
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(parse_attached(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn parse_attached(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(count, _)| *count != "0")
+        .map(|(_, name)| name.to_string())
+        .collect()
 }
 
 /// Live tail of a session's pane, most recent `lines` rows.
@@ -211,7 +241,14 @@ pub fn kill_session(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_name;
+    use super::{parse_attached, sanitize_name};
+
+    #[test]
+    fn attached_sessions_are_those_with_a_client() {
+        let out = "0\tidle\n1\tone-client\n2\ttwo-clients\n";
+        assert_eq!(parse_attached(out), ["one-client", "two-clients"]);
+        assert!(parse_attached("").is_empty());
+    }
 
     #[test]
     fn target_separators_become_dashes() {
