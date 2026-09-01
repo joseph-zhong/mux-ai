@@ -56,9 +56,6 @@ struct AppState {
     cols: usize,
     tiles: Vec<Tile>,
     panes: HashMap<String, String>,
-    /// Tile size we last pushed to each tmux window, so we only resize on change
-    /// instead of shelling out to tmux every poll.
-    sizes: HashMap<String, (u16, u16)>,
     mode: Mode,
     message: Option<String>,
     light_bg: bool,
@@ -135,7 +132,6 @@ pub fn run() -> Result<()> {
         cols: 1,
         tiles: Vec::new(),
         panes: HashMap::new(),
-        sizes: HashMap::new(),
         mode: Mode::Normal,
         message: None,
         light_bg,
@@ -239,10 +235,6 @@ fn event_loop(
                                 enable_raw_mode()?;
                                 execute!(terminal.backend_mut(), EnterAlternateScreen)?;
                                 terminal.clear()?;
-                                // tmux resized the window to the real terminal for
-                                // the attach; forget our cached tile sizes so the
-                                // next poll puts it back.
-                                state.sizes.clear();
                                 if let Err(e) = attach_result {
                                     state.message = Some(format!("attach error: {e}"));
                                 }
@@ -370,7 +362,7 @@ fn pick_cols(n: usize, area: Rect) -> usize {
 /// Size each tmux window to the tile it renders into, so the agent inside wraps its own
 /// output at the tile width. Without this we re-wrap 80-column text into a 44-column
 /// cell and every line comes out shredded.
-fn sync_window_sizes(state: &mut AppState, area: Rect) {
+fn sync_window_sizes(state: &AppState, area: Rect) {
     if state.tiles.is_empty() {
         return;
     }
@@ -381,28 +373,36 @@ fn sync_window_sizes(state: &mut AppState, area: Rect) {
     if inner_w == 0 || inner_h == 0 {
         return;
     }
-    // Resizing a session someone is attached to shrinks it under them, leaving tmux's
-    // dotted background round the edge. Forgetting the pushed size re-tiles on detach.
-    let attached = tmux::attached_sessions().unwrap_or_default();
-    for name in &attached {
-        state.sizes.remove(name);
+    let Ok(live) = tmux::window_sizes() else {
+        return;
+    };
+    for name in stale_windows(&state.tiles, &live, (inner_w, inner_h)) {
+        // Best-effort: a session that died between poll and resize just retries later.
+        let _ = tmux::resize_window(&name, inner_w, inner_h);
     }
-    let stale: Vec<String> = state
-        .tiles
+}
+
+/// Running sessions whose tmux window is not the size of the tile it renders into.
+/// The size has to be measured, not remembered: `client-attached`, `client-resized`
+/// and a second dashboard on a differently-sized terminal all resize a window behind
+/// this one's back, and a dashboard that trusts what it last pushed never puts such a
+/// window back — its tile then shows the left slice of a much wider render forever.
+/// A session someone is attached to right now is left alone: resizing that one shrinks
+/// it under them, leaving tmux's dotted background round the edge of their terminal.
+fn stale_windows(
+    tiles: &[Tile],
+    live: &HashMap<String, (u16, u16, bool)>,
+    target: (u16, u16),
+) -> Vec<String> {
+    tiles
         .iter()
-        .filter(|t| {
-            t.running
-                && !attached.contains(&t.name)
-                && state.sizes.get(&t.name) != Some(&(inner_w, inner_h))
+        .filter(|t| t.running)
+        .filter(|t| match live.get(&t.name) {
+            Some(&(w, h, attached)) => !attached && (w, h) != target,
+            None => false,
         })
         .map(|t| t.name.clone())
-        .collect();
-    for name in stale {
-        // Best-effort: a session that died between poll and resize just retries later.
-        if tmux::resize_window(&name, inner_w, inner_h).is_ok() {
-            state.sizes.insert(name, (inner_w, inner_h));
-        }
-    }
+        .collect()
 }
 
 fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
@@ -569,6 +569,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn tile(name: &str, running: bool) -> Tile {
+        Tile {
+            name: name.to_string(),
+            worktree_path: PathBuf::from("/tmp").join(name),
+            running,
+        }
+    }
+
+    #[test]
+    fn a_window_resized_behind_our_back_is_stale() {
+        // The bug this guards: attaching from another terminal fires tmux's
+        // client-attached hook, which snaps the window to that terminal's size. The
+        // old code cached what it had asked for and so never put the window back.
+        let tiles = [tile("a", true), tile("b", true)];
+        let live = HashMap::from([
+            ("a".to_string(), (142, 59, false)),
+            ("b".to_string(), (288, 186, false)),
+        ]);
+        assert_eq!(stale_windows(&tiles, &live, (142, 59)), ["b"]);
+    }
+
+    #[test]
+    fn an_attached_session_is_left_at_its_terminals_size() {
+        let tiles = [tile("a", true)];
+        let live = HashMap::from([("a".to_string(), (288, 186, true))]);
+        assert!(stale_windows(&tiles, &live, (142, 59)).is_empty());
+    }
+
+    #[test]
+    fn stopped_and_unknown_sessions_are_not_resized() {
+        let tiles = [tile("stopped", false), tile("gone", true)];
+        let live = HashMap::from([("stopped".to_string(), (288, 186, false))]);
+        assert!(stale_windows(&tiles, &live, (142, 59)).is_empty());
     }
 
     #[test]
