@@ -7,7 +7,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::session_store::{worktree_root, SessionStore};
-use crate::{create_session, tmux, worktree};
+use crate::{agent, create_session, tmux, worktree};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// Re-scanning git and tmux costs two subprocesses, so it runs slower than the pane
@@ -40,7 +40,15 @@ const HOLE_PENALTY: f32 = 0.15;
 
 enum Mode {
     Normal,
-    NewInput(String),
+    /// Which agent to run comes before the name: it decides what the session *is*,
+    /// and skipping it is what made every new session a claude session.
+    NewAgent {
+        agent: usize,
+    },
+    NewInput {
+        name: String,
+        agent: usize,
+    },
     ConfirmKill,
 }
 
@@ -49,6 +57,8 @@ struct Tile {
     name: String,
     worktree_path: PathBuf,
     running: bool,
+    /// Agent preset from the session store, absent when that record was lost.
+    agent: Option<String>,
 }
 
 struct AppState {
@@ -60,6 +70,18 @@ struct AppState {
     message: Option<String>,
     light_bg: bool,
     repo_root: PathBuf,
+    /// Installed agent presets, resolved once at startup — PATH doesn't move under us.
+    agents: Vec<&'static agent::Agent>,
+}
+
+impl AppState {
+    fn highlight(&self) -> Color {
+        if self.light_bg {
+            Color::Blue
+        } else {
+            Color::Yellow
+        }
+    }
 }
 
 /// What the dashboard shows is git's worktree list plus tmux's live session list —
@@ -70,11 +92,16 @@ struct AppState {
 fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
     let root = worktree_root(repo_root);
     let running = tmux::list_sessions_with_paths()?;
+    // Re-read rather than reuse the caller's copy: another muxai process may have
+    // added a session since, and the agent tag is only in the store.
+    let store = SessionStore::load().unwrap_or_default();
+    let agent_of = |name: &str| store.get(name).map(|s| s.agent.clone());
 
     let mut tiles: Vec<Tile> = worktree::list(repo_root)?
         .into_iter()
         .map(|w| Tile {
             running: running.iter().any(|(name, _)| *name == w.name),
+            agent: agent_of(&w.name),
             name: w.name,
             worktree_path: w.path,
         })
@@ -85,6 +112,7 @@ fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
     for (name, path) in running {
         if path.parent() == Some(root.as_path()) && !tiles.iter().any(|t| t.name == name) {
             tiles.push(Tile {
+                agent: agent_of(&name),
                 name,
                 worktree_path: path,
                 running: true,
@@ -136,6 +164,7 @@ pub fn run() -> Result<()> {
         message: None,
         light_bg,
         repo_root,
+        agents: agent::available(),
     };
     let result = event_loop(&mut terminal, &mut store, &mut state);
 
@@ -241,7 +270,21 @@ fn event_loop(
                                 refresh(state);
                             }
                             KeyCode::Char('n') => {
-                                state.mode = Mode::NewInput(String::new());
+                                state.mode = match state.agents.len() {
+                                    0 => {
+                                        state.message = Some(format!(
+                                            "no agent installed — looked for {} on PATH",
+                                            agent::all_names().join(", ")
+                                        ));
+                                        Mode::Normal
+                                    }
+                                    // Nothing to choose between: go straight to the name.
+                                    1 => Mode::NewInput {
+                                        name: String::new(),
+                                        agent: 0,
+                                    },
+                                    _ => Mode::NewAgent { agent: 0 },
+                                };
                             }
                             KeyCode::Char('k') if len > 0 => {
                                 state.mode = Mode::ConfirmKill;
@@ -249,19 +292,53 @@ fn event_loop(
                             _ => {}
                         }
                     }
-                    Mode::NewInput(buf) => match key.code {
+                    Mode::NewAgent { agent } => {
+                        let len = state.agents.len();
+                        match key.code {
+                            KeyCode::Right | KeyCode::Tab => *agent = (*agent + 1) % len,
+                            KeyCode::Left => *agent = (*agent + len - 1) % len,
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                if let Some(i) = c.to_digit(10).and_then(|d| d.checked_sub(1)) {
+                                    if (i as usize) < len {
+                                        *agent = i as usize;
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let agent = *agent;
+                                state.mode = Mode::NewInput {
+                                    name: String::new(),
+                                    agent,
+                                };
+                            }
+                            KeyCode::Esc => state.mode = Mode::Normal,
+                            _ => {}
+                        }
+                    }
+                    Mode::NewInput { name: buf, agent } => match key.code {
                         KeyCode::Enter => {
                             let name = buf.trim().to_string();
+                            let preset = state.agents[*agent];
                             state.mode = Mode::Normal;
                             if !name.is_empty() {
-                                match create_session(store, &state.repo_root, &name, None, "claude")
-                                {
-                                    Ok(s) => state.message = Some(format!("created '{}'", s.name)),
+                                match create_session(
+                                    store,
+                                    &state.repo_root,
+                                    &name,
+                                    None,
+                                    preset.name,
+                                    preset.command,
+                                ) {
+                                    Ok(s) => {
+                                        state.message =
+                                            Some(format!("created '{}' ({})", s.name, s.agent))
+                                    }
                                     Err(e) => state.message = Some(format!("error: {e}")),
                                 }
                                 refresh(state);
                             }
                         }
+                        KeyCode::Tab => *agent = (*agent + 1) % state.agents.len(),
                         KeyCode::Esc => state.mode = Mode::Normal,
                         KeyCode::Backspace => {
                             buf.pop();
@@ -293,7 +370,7 @@ fn event_loop(
 }
 
 /// Bring a stopped session back up in its existing worktree, reusing the command the
-/// store remembers for it (falling back to `claude` if that record was lost).
+/// store remembers for it (falling back to the default agent if that record was lost).
 fn restart(store: &SessionStore, name: &str, worktree_path: &Path) -> Result<()> {
     if !worktree_path.exists() {
         anyhow::bail!("worktree {} no longer exists", worktree_path.display());
@@ -301,7 +378,7 @@ fn restart(store: &SessionStore, name: &str, worktree_path: &Path) -> Result<()>
     let command = store
         .get(name)
         .map(|s| s.command.clone())
-        .unwrap_or_else(|| "claude".to_string());
+        .unwrap_or_else(|| agent::default_preset().command.to_string());
     tmux::new_session(name, worktree_path, &command)
 }
 
@@ -456,11 +533,7 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
                     Style::default().fg(Color::DarkGray),
                 )
             };
-            let title = if tile.running {
-                format!(" {} ", tile.name)
-            } else {
-                format!(" {} (stopped) ", tile.name)
-            };
+            let title = tile_title(tile);
             let block = Block::default()
                 .title(title)
                 .borders(Borders::ALL)
@@ -492,9 +565,53 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
     }
 }
 
+/// `name [agent] (stopped)`. The agent tag is what makes a mixed grid readable at a
+/// glance; it's absent for a worktree the session store has no record of.
+fn tile_title(tile: &Tile) -> String {
+    format!(
+        " {}{}{} ",
+        tile.name,
+        tile.agent
+            .as_deref()
+            .map(|a| format!(" [{a}]"))
+            .unwrap_or_default(),
+        if tile.running { "" } else { " (stopped)" }
+    )
+}
+
+/// `1 claude  2 codex`, the picked one highlighted. Numbered because on a phone
+/// keyboard a digit is reachable and an arrow key is not.
+fn agent_choices(state: &AppState, picked: usize) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw("Agent: ")];
+    for (i, a) in state.agents.iter().enumerate() {
+        let style = if i == picked {
+            Style::default()
+                .fg(state.highlight())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(format!("{} {}  ", i + 1, a.name), style));
+    }
+    spans
+}
+
 fn draw_status_line(f: &mut Frame, area: Rect, state: &AppState) {
+    if let Mode::NewAgent { agent } = &state.mode {
+        let mut spans = agent_choices(state, *agent);
+        spans.push(Span::styled(
+            " \u{2190}\u{2192}/1-9 pick   Enter continue   Esc cancel",
+            Style::default().fg(Color::DarkGray),
+        ));
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     let line = match &state.mode {
-        Mode::NewInput(buf) => format!("New session name: {buf}_"),
+        Mode::NewAgent { .. } => unreachable!("handled above"),
+        Mode::NewInput { name, agent } => format!(
+            "{} session name: {name}_   (Tab changes agent)",
+            state.agents[*agent].name
+        ),
         Mode::ConfirmKill => {
             let name = state
                 .tiles
@@ -514,6 +631,30 @@ mod tests {
 
     fn area(w: u16, h: u16) -> Rect {
         Rect::new(0, 0, w, h)
+    }
+
+    fn tile(agent: Option<&str>, running: bool) -> Tile {
+        Tile {
+            name: "sess".to_string(),
+            worktree_path: PathBuf::from("/tmp/sess"),
+            running,
+            agent: agent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn tile_title_tags_the_agent() {
+        assert_eq!(tile_title(&tile(Some("codex"), true)), " sess [codex] ");
+        assert_eq!(
+            tile_title(&tile(Some("codex"), false)),
+            " sess [codex] (stopped) "
+        );
+    }
+
+    #[test]
+    fn tile_title_omits_an_unknown_agent() {
+        assert_eq!(tile_title(&tile(None, true)), " sess ");
+        assert_eq!(tile_title(&tile(None, false)), " sess (stopped) ");
     }
 
     #[test]

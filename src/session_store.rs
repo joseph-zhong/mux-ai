@@ -9,6 +9,10 @@ pub struct Session {
     pub repo_root: PathBuf,
     pub worktree_path: PathBuf,
     pub branch: String,
+    /// Preset the session was started from, or `custom` for an explicit command.
+    /// Defaulted on read so session stores written before presets existed still load.
+    #[serde(default = "crate::agent::default_name")]
+    pub agent: String,
     pub command: String,
     pub created_at: String,
 }
@@ -82,4 +86,24 @@ impl SessionStore {
 
 pub fn worktree_root(repo_root: &Path) -> PathBuf {
     repo_root.join(".muxai/worktrees")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+
+    /// Session stores written before agent presets existed have no `agent` field.
+    #[test]
+    fn a_record_without_an_agent_field_still_loads() {
+        let json = r#"{
+            "name": "old",
+            "repo_root": "/repo",
+            "worktree_path": "/repo/.muxai/worktrees/old",
+            "branch": "old",
+            "command": "claude",
+            "created_at": "2026-08-01T00:00:00Z"
+        }"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(s.agent, "claude");
+    }
 }
