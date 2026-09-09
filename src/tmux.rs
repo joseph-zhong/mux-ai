@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -159,26 +160,35 @@ pub fn list_sessions_with_paths() -> Result<Vec<(String, PathBuf)>> {
         .collect())
 }
 
-/// Sessions with at least one client attached.
-pub fn attached_sessions() -> Result<Vec<String>> {
+/// Every session's actual window size, plus whether a client is attached to it. The
+/// dashboard has to ask rather than remember what it last pushed: `client-attached`
+/// and `client-resized` resize a window to whatever terminal attaches to it, and a
+/// second dashboard on a differently-sized terminal sizes it to *its* tiles, so a
+/// window drifts behind our back and its tile ends up showing the left slice of a
+/// much wider render.
+pub fn window_sizes() -> Result<HashMap<String, (u16, u16, bool)>> {
     let out = tmux()
         .args([
             "list-sessions",
             "-F",
-            "#{session_attached}\t#{session_name}",
+            "#{session_name}\t#{window_width}\t#{window_height}\t#{session_attached}",
         ])
         .output()?;
     if !out.status.success() {
-        return Ok(Vec::new());
+        return Ok(HashMap::new());
     }
-    Ok(parse_attached(&String::from_utf8_lossy(&out.stdout)))
+    Ok(parse_window_sizes(&String::from_utf8_lossy(&out.stdout)))
 }
 
-fn parse_attached(out: &str) -> Vec<String> {
+fn parse_window_sizes(out: &str) -> HashMap<String, (u16, u16, bool)> {
     out.lines()
-        .filter_map(|l| l.split_once('\t'))
-        .filter(|(count, _)| *count != "0")
-        .map(|(_, name)| name.to_string())
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let name = f.next()?.to_string();
+            let w = f.next()?.parse().ok()?;
+            let h = f.next()?.parse().ok()?;
+            Some((name, (w, h, f.next()? != "0")))
+        })
         .collect()
 }
 
@@ -241,13 +251,21 @@ pub fn kill_session(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_attached, sanitize_name};
+    use super::{parse_window_sizes, sanitize_name};
+    use std::collections::HashMap;
 
     #[test]
-    fn attached_sessions_are_those_with_a_client() {
-        let out = "0\tidle\n1\tone-client\n2\ttwo-clients\n";
-        assert_eq!(parse_attached(out), ["one-client", "two-clients"]);
-        assert!(parse_attached("").is_empty());
+    fn window_sizes_carry_the_measured_size_and_attach_state() {
+        let out = "idle\t142\t59\t0\none-client\t288\t186\t1\ntwo-clients\t80\t24\t2\n";
+        assert_eq!(
+            parse_window_sizes(out),
+            HashMap::from([
+                ("idle".to_string(), (142, 59, false)),
+                ("one-client".to_string(), (288, 186, true)),
+                ("two-clients".to_string(), (80, 24, true)),
+            ])
+        );
+        assert!(parse_window_sizes("").is_empty());
     }
 
     #[test]
