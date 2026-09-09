@@ -67,8 +67,8 @@ From inside any git repo:
 
 ```sh
 muxai new demo -- 'echo hello from demo; sleep 300'   # worktree + tmux session
-muxai new demo2                                        # a second one, running claude
-muxai new demo3 --agent codex                          # a third, running codex
+muxai new demo2                                        # a second one, running codex
+muxai new demo3 --agent claude                         # a third, running claude
 
 muxai                # opens the grid dashboard
 # arrow keys: move selection    Enter: attach into the session
@@ -87,8 +87,8 @@ ones you actually run a name, and tag the dashboard tile so a mixed grid stays r
 
 | Preset | Runs |
 |---|---|
-| `claude` (default) | `claude` |
-| `codex` | `codex` |
+| `codex` (default) | `codex` |
+| `claude` | `claude` |
 
 The dashboard's `n` asks which agent before it asks for a name, and only offers the ones
 installed — so with a single agent on `PATH` it goes straight to the name, and with

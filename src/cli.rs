@@ -25,7 +25,7 @@ pub enum Command {
         /// Repo to create the worktree in (defaults to the current git repo).
         #[arg(long)]
         repo: Option<PathBuf>,
-        /// Agent preset to run: `claude` (default) or `codex`.
+        /// Agent preset to run: `codex` (default) or `claude`.
         #[arg(long)]
         agent: Option<String>,
         /// Command to run in the session (defaults to the agent preset's command).

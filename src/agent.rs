@@ -12,23 +12,19 @@ pub struct Agent {
 
 pub const PRESETS: &[Agent] = &[
     Agent {
-        name: "claude",
-        command: "claude",
-    },
-    Agent {
         name: "codex",
         command: "codex",
     },
+    Agent {
+        name: "claude",
+        command: "claude",
+    },
 ];
 
-pub const DEFAULT: &str = "claude";
+pub const DEFAULT: &str = "codex";
 
 /// Tag for a session started with an explicit `-- <command>` rather than a preset.
 pub const CUSTOM: &str = "custom";
-
-pub fn default_name() -> String {
-    DEFAULT.to_string()
-}
 
 pub fn default_preset() -> &'static Agent {
     &PRESETS[0]
@@ -70,13 +66,13 @@ mod tests {
 
     #[test]
     fn default_resolves_and_leads_the_picker() {
-        assert_eq!(resolve(DEFAULT).unwrap().command, "claude");
+        assert_eq!(resolve(DEFAULT).unwrap().command, "codex");
         assert_eq!(default_preset().name, DEFAULT);
     }
 
     #[test]
-    fn codex_is_a_preset() {
-        assert_eq!(resolve("codex").unwrap().command, "codex");
+    fn claude_is_a_preset() {
+        assert_eq!(resolve("claude").unwrap().command, "claude");
     }
 
     #[test]

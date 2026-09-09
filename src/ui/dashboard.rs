@@ -579,7 +579,7 @@ fn tile_title(tile: &Tile) -> String {
     )
 }
 
-/// `1 claude  2 codex`, the picked one highlighted. Numbered because on a phone
+/// `1 codex  2 claude`, the picked one highlighted. Numbered because on a phone
 /// keyboard a digit is reachable and an arrow key is not.
 fn agent_choices(state: &AppState, picked: usize) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw("Agent: ")];

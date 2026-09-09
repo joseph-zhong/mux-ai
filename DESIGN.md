@@ -133,8 +133,8 @@ This directly shapes the resource commands:
 
 In:
 - `muxai new <name> [--branch <branch>] [--agent <preset>] [-- <command...>]` — create
-  worktree + tmux session running the agent in it. `--agent` selects a preset (`claude`,
-  the default, or `codex`); an explicit `-- <command...>` overrides it.
+  worktree + tmux session running the agent in it. `--agent` selects a preset (`codex`,
+  the default, or `claude`); an explicit `-- <command...>` overrides it.
 - `muxai` (no args) / `muxai dashboard` — grid dashboard: live capture-pane tiles,
   arrow-key selection, Enter to attach, `n` new session (picks the agent from those
   installed, then prompts for a name), `k` kill selected

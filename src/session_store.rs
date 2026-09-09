@@ -11,10 +11,14 @@ pub struct Session {
     pub branch: String,
     /// Preset the session was started from, or `custom` for an explicit command.
     /// Defaulted on read so session stores written before presets existed still load.
-    #[serde(default = "crate::agent::default_name")]
+    #[serde(default = "legacy_agent_name")]
     pub agent: String,
     pub command: String,
     pub created_at: String,
+}
+
+fn legacy_agent_name() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Default)]
