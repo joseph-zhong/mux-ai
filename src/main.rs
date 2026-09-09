@@ -1,3 +1,4 @@
+mod agent;
 mod cli;
 mod session_store;
 mod stats;
@@ -21,19 +22,47 @@ fn main() -> Result<()> {
             name,
             branch,
             repo,
+            agent,
             command,
         } => {
             let repo_root = resolve_repo_root(repo)?;
             let mut store = SessionStore::load()?;
+            // An explicit `-- <command>` still wins over the preset's command; the
+            // preset name is kept either way, since it's what the dashboard tags.
+            let agent_name = agent.unwrap_or_else(|| {
+                if command.is_empty() {
+                    agent::DEFAULT.to_string()
+                } else {
+                    agent::CUSTOM.to_string()
+                }
+            });
             let cmd = if command.is_empty() {
-                "claude".to_string()
+                let preset = agent::resolve(&agent_name)?;
+                // Without this the tmux session starts, the command is not found, and
+                // the pane dies — surfacing as an empty tile rather than a missing CLI.
+                if !agent::on_path(preset.command) {
+                    anyhow::bail!(
+                        "agent '{}' needs '{}' on PATH, and it isn't installed",
+                        preset.name,
+                        preset.command
+                    );
+                }
+                preset.command.to_string()
             } else {
                 command.join(" ")
             };
-            let session = create_session(&mut store, &repo_root, &name, branch.as_deref(), &cmd)?;
+            let session = create_session(
+                &mut store,
+                &repo_root,
+                &name,
+                branch.as_deref(),
+                &agent_name,
+                &cmd,
+            )?;
             println!(
-                "created session '{}' in {} (branch '{}')\n  attach: muxai   (then select it and press Enter)",
+                "created session '{}' running '{}' in {} (branch '{}')\n  attach: muxai   (then select it and press Enter)",
                 session.name,
+                session.command,
                 session.worktree_path.display(),
                 session.branch
             );
@@ -94,6 +123,7 @@ pub fn create_session(
     repo_root: &Path,
     name: &str,
     branch: Option<&str>,
+    agent: &str,
     command: &str,
 ) -> Result<Session> {
     let name = tmux::sanitize_name(name);
@@ -115,6 +145,7 @@ pub fn create_session(
         repo_root: repo_root.to_path_buf(),
         worktree_path,
         branch,
+        agent: agent.to_string(),
         command: command.to_string(),
         created_at: Utc::now().to_rfc3339(),
     };
