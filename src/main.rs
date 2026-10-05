@@ -180,6 +180,7 @@ pub fn create_session(
     }
 
     let branch = branch.unwrap_or(&name).to_string();
+    let recovered = worktree::branch_exists(repo_root, &branch)?;
     let worktree_path = worktree::create(repo_root, &name, &branch)?;
 
     tmux::ensure_server()?;
@@ -199,10 +200,7 @@ pub fn create_session(
         created_at: Utc::now().to_rfc3339(),
     };
     store.add(session.clone())?;
-    Ok(SessionLaunch {
-        session,
-        recovered: false,
-    })
+    Ok(SessionLaunch { session, recovered })
 }
 
 fn print_status(store: &SessionStore) {
