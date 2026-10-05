@@ -13,6 +13,11 @@ use cli::{Cli, Command};
 use session_store::{Session, SessionStore};
 use std::path::{Path, PathBuf};
 
+pub struct SessionLaunch {
+    pub session: Session,
+    pub recovered: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     tmux::ensure_available()?;
@@ -51,7 +56,7 @@ fn main() -> Result<()> {
             } else {
                 command.join(" ")
             };
-            let session = create_session(
+            let launch = create_session(
                 &mut store,
                 &repo_root,
                 &name,
@@ -59,8 +64,10 @@ fn main() -> Result<()> {
                 &agent_name,
                 &cmd,
             )?;
+            let session = launch.session;
             println!(
-                "created session '{}' running '{}' in {} (branch '{}')\n  attach: muxai   (then select it and press Enter)",
+                "{} session '{}' running '{}' in {} (branch '{}')\n  attach: muxai   (then select it and press Enter)",
+                if launch.recovered { "recovered" } else { "created" },
                 session.name,
                 session.command,
                 session.worktree_path.display(),
@@ -125,11 +132,53 @@ pub fn create_session(
     branch: Option<&str>,
     agent: &str,
     command: &str,
-) -> Result<Session> {
+) -> Result<SessionLaunch> {
     let name = tmux::sanitize_name(name);
-    if store.get(&name).is_some() {
-        anyhow::bail!("session '{name}' already exists");
+    store.reload()?;
+
+    if let Some(existing) = worktree::list(repo_root)?
+        .into_iter()
+        .find(|candidate| candidate.name == name)
+    {
+        let remembered = store
+            .get(&name)
+            .filter(|session| {
+                session.repo_root == repo_root && session.worktree_path == existing.path
+            })
+            .cloned();
+        let session = remembered.unwrap_or_else(|| Session {
+            name: name.clone(),
+            repo_root: repo_root.to_path_buf(),
+            worktree_path: existing.path.clone(),
+            branch: branch.unwrap_or(&name).to_string(),
+            agent: agent.to_string(),
+            command: command.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        });
+
+        let running_path = tmux::list_sessions_with_paths()?
+            .into_iter()
+            .find_map(|(running_name, path)| (running_name == name).then_some(path));
+        match running_path {
+            Some(path) if path != existing.path => anyhow::bail!(
+                "tmux session '{name}' belongs to {}, not {}",
+                path.display(),
+                existing.path.display()
+            ),
+            Some(_) => {}
+            None => {
+                tmux::ensure_server()?;
+                tmux::new_session(&name, &existing.path, &session.command)?;
+            }
+        }
+
+        store.add(session.clone())?;
+        return Ok(SessionLaunch {
+            session,
+            recovered: true,
+        });
     }
+
     let branch = branch.unwrap_or(&name).to_string();
     let worktree_path = worktree::create(repo_root, &name, &branch)?;
 
@@ -150,7 +199,10 @@ pub fn create_session(
         created_at: Utc::now().to_rfc3339(),
     };
     store.add(session.clone())?;
-    Ok(session)
+    Ok(SessionLaunch {
+        session,
+        recovered: false,
+    })
 }
 
 fn print_status(store: &SessionStore) {

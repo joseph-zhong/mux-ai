@@ -134,13 +134,25 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         name,
         "-c",
         &cwd.to_string_lossy(),
-        command,
     ]))?;
-    // The server is now guaranteed to have a live session, so these are guaranteed
-    // to apply (see ensure_server's note on exit-empty).
-    bind_detach_key()?;
-    configure_status_bar()?;
-    configure_window_sizing()?;
+    let configured = (|| {
+        // The server is now guaranteed to have a live session, so these are guaranteed
+        // to apply (see ensure_server's note on exit-empty).
+        bind_detach_key()?;
+        configure_status_bar()?;
+        configure_window_sizing()?;
+
+        // Run the agent inside the pane's interactive shell instead of replacing the
+        // shell with it. If the agent exits during startup, the pane stays usable and
+        // preserves the error at a prompt rather than disappearing without evidence.
+        run_ok(tmux().args(["send-keys", "-t", name, "-l", command]))?;
+        run_ok(tmux().args(["send-keys", "-t", name, "Enter"]))?;
+        Ok(())
+    })();
+    if let Err(e) = configured {
+        let _ = kill_session(name);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -155,7 +167,7 @@ pub fn list_sessions_with_paths() -> Result<Vec<(String, PathBuf)>> {
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|l| l.split_once('\t'))
+        .filter_map(|line| line.split_once('\t'))
         .map(|(name, path)| (name.to_string(), PathBuf::from(path)))
         .collect())
 }

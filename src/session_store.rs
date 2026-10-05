@@ -66,6 +66,11 @@ impl SessionStore {
         self.sessions.iter().find(|s| s.name == name)
     }
 
+    pub fn reload(&mut self) -> Result<()> {
+        *self = Self::load()?;
+        Ok(())
+    }
+
     /// Several muxai processes share one store file, and `save` rewrites the whole
     /// file — so every mutation re-reads first, or a stale in-memory copy silently
     /// deletes sessions another process created.

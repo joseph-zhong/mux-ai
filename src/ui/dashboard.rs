@@ -110,7 +110,7 @@ fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
     // A live session whose worktree was deleted underneath it still has a running
     // agent in it, so it needs a tile too.
     for (name, path) in running {
-        if path.parent() == Some(root.as_path()) && !tiles.iter().any(|t| t.name == name) {
+        if path.starts_with(&root) && !tiles.iter().any(|t| t.name == name) {
             tiles.push(Tile {
                 agent: agent_of(&name),
                 name,
@@ -212,6 +212,7 @@ fn event_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                let mut attach_name = None;
                 match &mut state.mode {
                     Mode::Normal => {
                         let len = state.tiles.len();
@@ -256,18 +257,7 @@ fn event_loop(
                                         }
                                     }
                                 }
-                                // The pushed tile size outlives the attach.
-                                let _ = tmux::follow_client(&name);
-                                disable_raw_mode()?;
-                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                let attach_result = tmux::attach(&name);
-                                enable_raw_mode()?;
-                                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                                terminal.clear()?;
-                                if let Err(e) = attach_result {
-                                    state.message = Some(format!("attach error: {e}"));
-                                }
-                                refresh(state);
+                                attach_name = Some(name);
                             }
                             KeyCode::Char('n') => {
                                 state.mode = match state.agents.len() {
@@ -329,9 +319,17 @@ fn event_loop(
                                     preset.name,
                                     preset.command,
                                 ) {
-                                    Ok(s) => {
-                                        state.message =
-                                            Some(format!("created '{}' ({})", s.name, s.agent))
+                                    Ok(launch) => {
+                                        let verb = if launch.recovered {
+                                            "recovered"
+                                        } else {
+                                            "created"
+                                        };
+                                        state.message = Some(format!(
+                                            "{verb} '{}' ({})",
+                                            launch.session.name, launch.session.agent
+                                        ));
+                                        attach_name = Some(launch.session.name);
                                     }
                                     Err(e) => state.message = Some(format!("error: {e}")),
                                 }
@@ -363,9 +361,32 @@ fn event_loop(
                         _ => state.mode = Mode::Normal,
                     },
                 }
+                if let Some(name) = attach_name {
+                    attach_session(terminal, state, &name)?;
+                }
             }
         }
     }
+    Ok(())
+}
+
+fn attach_session(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    name: &str,
+) -> Result<()> {
+    // The pushed tile size outlives the attach.
+    let _ = tmux::follow_client(name);
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    let attach_result = tmux::attach(name);
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    if let Err(e) = attach_result {
+        state.message = Some(format!("attach error: {e}"));
+    }
+    refresh(state);
     Ok(())
 }
 

@@ -60,8 +60,8 @@ pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
             path = Some(PathBuf::from(rest));
         } else if line.is_empty() {
             if let Some(p) = path.take() {
-                if p.parent() == Some(root.as_path()) {
-                    if let Some(name) = p.file_name() {
+                if let Ok(name) = p.strip_prefix(&root) {
+                    if !name.as_os_str().is_empty() {
                         found.push(Worktree {
                             name: name.to_string_lossy().into_owned(),
                             path: p,
@@ -150,6 +150,7 @@ mod tests {
         let repo = tmp_repo();
         let alpha = create(&repo, "alpha", "alpha").unwrap();
         create(&repo, "beta", "beta").unwrap();
+        create(&repo, "team/gamma", "team/gamma").unwrap();
         // A worktree outside .muxai/worktrees belongs to the user, not to muxai.
         let outside = repo.join("elsewhere");
         run_ok(git(&repo).args([
@@ -164,7 +165,7 @@ mod tests {
 
         let mut names: Vec<String> = list(&repo).unwrap().into_iter().map(|w| w.name).collect();
         names.sort();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(names, vec!["alpha", "beta", "team/gamma"]);
 
         // The bug this guards: from inside a linked worktree, --show-toplevel returns
         // the worktree itself, so the dashboard would look for sessions in the wrong place.
