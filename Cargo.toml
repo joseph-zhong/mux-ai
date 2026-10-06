@@ -1,6 +1,6 @@
 [package]
 name = "muxai"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2021"
 description = "Grid-dashboard TUI for managing multiple coding agents across git worktrees, on top of tmux."
 license = "MIT"

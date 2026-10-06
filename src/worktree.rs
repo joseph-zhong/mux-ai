@@ -60,8 +60,8 @@ pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
             path = Some(PathBuf::from(rest));
         } else if line.is_empty() {
             if let Some(p) = path.take() {
-                if p.parent() == Some(root.as_path()) {
-                    if let Some(name) = p.file_name() {
+                if let Ok(name) = p.strip_prefix(&root) {
+                    if !name.as_os_str().is_empty() {
                         found.push(Worktree {
                             name: name.to_string_lossy().into_owned(),
                             path: p,
@@ -92,7 +92,20 @@ fn ensure_gitignored(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates `<repo_root>/.muxai/worktrees/<name>` on a new branch `branch`.
+pub fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
+    let reference = format!("refs/heads/{branch}");
+    let status = git(repo_root)
+        .args(["show-ref", "--verify", "--quiet", &reference])
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git show-ref failed for branch '{branch}'"),
+    }
+}
+
+/// Creates `<repo_root>/.muxai/worktrees/<name>`, reattaching `branch` when it already
+/// exists and creating it otherwise.
 pub fn create(repo_root: &Path, name: &str, branch: &str) -> Result<PathBuf> {
     ensure_gitignored(repo_root)?;
     let path = worktree_root(repo_root).join(name);
@@ -102,7 +115,11 @@ pub fn create(repo_root: &Path, name: &str, branch: &str) -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    run_ok(git(repo_root).args(["worktree", "add", "-b", branch, &path.to_string_lossy()]))?;
+    if branch_exists(repo_root, branch)? {
+        run_ok(git(repo_root).args(["worktree", "add", &path.to_string_lossy(), branch]))?;
+    } else {
+        run_ok(git(repo_root).args(["worktree", "add", "-b", branch, &path.to_string_lossy()]))?;
+    }
     Ok(path)
 }
 
@@ -150,6 +167,13 @@ mod tests {
         let repo = tmp_repo();
         let alpha = create(&repo, "alpha", "alpha").unwrap();
         create(&repo, "beta", "beta").unwrap();
+        create(&repo, "team/gamma", "team/gamma").unwrap();
+        assert!(git(&repo)
+            .args(["branch", "orphaned"])
+            .status()
+            .unwrap()
+            .success());
+        create(&repo, "orphaned", "orphaned").unwrap();
         // A worktree outside .muxai/worktrees belongs to the user, not to muxai.
         let outside = repo.join("elsewhere");
         run_ok(git(&repo).args([
@@ -164,7 +188,7 @@ mod tests {
 
         let mut names: Vec<String> = list(&repo).unwrap().into_iter().map(|w| w.name).collect();
         names.sort();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(names, vec!["alpha", "beta", "orphaned", "team/gamma"]);
 
         // The bug this guards: from inside a linked worktree, --show-toplevel returns
         // the worktree itself, so the dashboard would look for sessions in the wrong place.
