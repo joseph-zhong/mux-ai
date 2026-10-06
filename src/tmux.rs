@@ -133,15 +133,28 @@ pub fn resize_window(name: &str, width: u16, height: u16) -> Result<()> {
 }
 
 pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
-    run_ok(tmux().args([
-        "new-session",
-        "-d",
-        "-s",
-        name,
-        "-c",
-        &cwd.to_string_lossy(),
-    ]))?;
+    let pane_cwd = format!("MUXAI_CWD={}", cwd.to_string_lossy());
+    run_ok(
+        tmux()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                name,
+                "-c",
+                &cwd.to_string_lossy(),
+                "-e",
+                &pane_cwd,
+            ])
+            // tmux's server keeps the PWD from the process that first started it. If
+            // that directory is later deleted, tmux 3.7 can ignore `-c` for the pane
+            // even though `session_path` reports the requested directory. An explicit
+            // shell `cd` repairs the process cwd before the interactive shell starts.
+            .arg(r#"cd -- "$MUXAI_CWD" && exec "$SHELL""#),
+    )?;
     let started = (|| {
+        wait_for_pane_path(name, cwd)?;
+
         // The server is now guaranteed to have a live session, so these are guaranteed
         // to target it. UI configuration is best-effort: a failed keybind or hook must
         // not destroy a usable shell or strand it in a deleted worktree.
@@ -161,6 +174,30 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+fn wait_for_pane_path(name: &str, cwd: &Path) -> Result<()> {
+    let mut actual = None;
+    for _ in 0..100 {
+        if let Some(session) = list_sessions()?
+            .into_iter()
+            .find(|session| session.name == name)
+        {
+            if session.pane_path == cwd && session.pane_path.exists() {
+                return Ok(());
+            }
+            actual = Some(session.pane_path);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    bail!(
+        "tmux pane '{name}' started in {}, not {}",
+        actual.as_deref().map_or_else(
+            || "an unknown directory".to_string(),
+            |path| path.display().to_string()
+        ),
+        cwd.display()
+    )
 }
 
 /// Live sessions plus both tmux's configured session directory and the active pane's
