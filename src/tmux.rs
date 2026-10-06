@@ -141,12 +141,13 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         "-c",
         &cwd.to_string_lossy(),
     ]))?;
-    let configured = (|| {
+    let started = (|| {
         // The server is now guaranteed to have a live session, so these are guaranteed
-        // to apply (see ensure_server's note on exit-empty).
-        bind_detach_key()?;
-        configure_status_bar()?;
-        configure_window_sizing()?;
+        // to target it. UI configuration is best-effort: a failed keybind or hook must
+        // not destroy a usable shell or strand it in a deleted worktree.
+        let _ = bind_detach_key();
+        let _ = configure_status_bar();
+        let _ = configure_window_sizing();
 
         // Run the agent inside the pane's interactive shell instead of replacing the
         // shell with it. If the agent exits during startup, the pane stays usable and
@@ -155,7 +156,7 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         run_ok(tmux().args(["send-keys", "-t", name, "Enter"]))?;
         Ok(())
     })();
-    if let Err(e) = configured {
+    if let Err(e) = started {
         let _ = kill_session(name);
         return Err(e);
     }

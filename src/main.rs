@@ -208,9 +208,12 @@ pub fn create_session(
         tmux::new_session(&name, &worktree_path, command)
     })();
     if let Err(e) = start {
-        // Don't leave an orphaned worktree if the tmux session failed to start.
-        let _ = worktree::remove(repo_root, &worktree_path);
-        return Err(e);
+        return Err(e).with_context(|| {
+            format!(
+                "tmux startup failed; kept worktree {} — retry the same name to recover it",
+                worktree_path.display()
+            )
+        });
     }
 
     let session = Session {
