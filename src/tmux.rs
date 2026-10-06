@@ -9,6 +9,12 @@ use std::process::{Command, Stdio};
 const SOCKET: &str = "muxai";
 const DETACH_KEY: &str = "C-\\";
 
+pub struct LiveSession {
+    pub name: String,
+    pub session_path: PathBuf,
+    pub pane_path: PathBuf,
+}
+
 fn tmux() -> Command {
     let mut cmd = Command::new("tmux");
     cmd.args(["-L", SOCKET]);
@@ -156,20 +162,34 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
     Ok(())
 }
 
-/// Live sessions plus each one's working directory, so the dashboard can tell which
-/// live sessions belong to the repo it was launched from.
-pub fn list_sessions_with_paths() -> Result<Vec<(String, PathBuf)>> {
+/// Live sessions plus both tmux's configured session directory and the active pane's
+/// actual directory. They can differ when a shell changes directory, and the latter
+/// can become invalid if its directory is deleted underneath it.
+pub fn list_sessions() -> Result<Vec<LiveSession>> {
     let out = tmux()
-        .args(["list-sessions", "-F", "#{session_name}\t#{session_path}"])
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}\t#{session_path}\t#{pane_current_path}",
+        ])
         .output()?;
     if !out.status.success() {
         return Ok(Vec::new());
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(name, path)| (name.to_string(), PathBuf::from(path)))
-        .collect())
+    Ok(parse_sessions(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn parse_sessions(out: &str) -> Vec<LiveSession> {
+    out.lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            Some(LiveSession {
+                name: fields.next()?.to_string(),
+                session_path: PathBuf::from(fields.next()?),
+                pane_path: PathBuf::from(fields.next()?),
+            })
+        })
+        .collect()
 }
 
 /// Every session's actual window size, plus whether a client is attached to it. The
@@ -263,8 +283,9 @@ pub fn kill_session(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_window_sizes, sanitize_name};
+    use super::{parse_sessions, parse_window_sizes, sanitize_name};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn window_sizes_carry_the_measured_size_and_attach_state() {
@@ -278,6 +299,15 @@ mod tests {
             ])
         );
         assert!(parse_window_sizes("").is_empty());
+    }
+
+    #[test]
+    fn sessions_carry_configured_and_actual_paths() {
+        let sessions = parse_sessions("headlamp\t/repo/headlamp\t/deleted/old-cwd\n");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "headlamp");
+        assert_eq!(sessions[0].session_path, PathBuf::from("/repo/headlamp"));
+        assert_eq!(sessions[0].pane_path, PathBuf::from("/deleted/old-cwd"));
     }
 
     #[test]

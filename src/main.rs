@@ -156,16 +156,20 @@ pub fn create_session(
             created_at: Utc::now().to_rfc3339(),
         });
 
-        let running_path = tmux::list_sessions_with_paths()?
+        let running = tmux::list_sessions()?
             .into_iter()
-            .find_map(|(running_name, path)| (running_name == name).then_some(path));
-        match running_path {
-            Some(path) if path != existing.path => anyhow::bail!(
+            .find(|running| running.name == name);
+        match running {
+            Some(running) if running.session_path != existing.path => anyhow::bail!(
                 "tmux session '{name}' belongs to {}, not {}",
-                path.display(),
+                running.session_path.display(),
                 existing.path.display()
             ),
-            Some(_) => {}
+            Some(running) if running.pane_path.exists() => {}
+            Some(_) => {
+                let _ = tmux::kill_session(&name);
+                tmux::new_session(&name, &existing.path, &session.command)?;
+            }
             None => {
                 tmux::ensure_server()?;
                 tmux::new_session(&name, &existing.path, &session.command)?;
@@ -184,7 +188,26 @@ pub fn create_session(
     let worktree_path = worktree::create(repo_root, &name, &branch)?;
 
     tmux::ensure_server()?;
-    if let Err(e) = tmux::new_session(&name, &worktree_path, command) {
+    let start = (|| {
+        if let Some(running) = tmux::list_sessions()?
+            .into_iter()
+            .find(|running| running.name == name)
+        {
+            if running.session_path != worktree_path {
+                anyhow::bail!(
+                    "tmux session '{name}' belongs to {}, not {}",
+                    running.session_path.display(),
+                    worktree_path.display()
+                );
+            }
+            if !recovered {
+                anyhow::bail!("tmux session '{name}' already exists");
+            }
+            let _ = tmux::kill_session(&name);
+        }
+        tmux::new_session(&name, &worktree_path, command)
+    })();
+    if let Err(e) = start {
         // Don't leave an orphaned worktree if the tmux session failed to start.
         let _ = worktree::remove(repo_root, &worktree_path);
         return Err(e);

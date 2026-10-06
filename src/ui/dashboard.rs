@@ -91,7 +91,7 @@ impl AppState {
 /// no live tmux session stays visible as a stopped tile so its work is still reachable.
 fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
     let root = worktree_root(repo_root);
-    let running = tmux::list_sessions_with_paths()?;
+    let running = tmux::list_sessions()?;
     // Re-read rather than reuse the caller's copy: another muxai process may have
     // added a session since, and the agent tag is only in the store.
     let store = SessionStore::load().unwrap_or_default();
@@ -100,7 +100,9 @@ fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
     let mut tiles: Vec<Tile> = worktree::list(repo_root)?
         .into_iter()
         .map(|w| Tile {
-            running: running.iter().any(|(name, _)| *name == w.name),
+            running: running
+                .iter()
+                .any(|session| session.name == w.name && session.pane_path.exists()),
             agent: agent_of(&w.name),
             name: w.name,
             worktree_path: w.path,
@@ -109,12 +111,15 @@ fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
 
     // A live session whose worktree was deleted underneath it still has a running
     // agent in it, so it needs a tile too.
-    for (name, path) in running {
-        if path.starts_with(&root) && !tiles.iter().any(|t| t.name == name) {
+    for session in running {
+        if session.pane_path.exists()
+            && session.session_path.starts_with(&root)
+            && !tiles.iter().any(|t| t.name == session.name)
+        {
             tiles.push(Tile {
-                agent: agent_of(&name),
-                name,
-                worktree_path: path,
+                agent: agent_of(&session.name),
+                name: session.name,
+                worktree_path: session.session_path,
                 running: true,
             });
         }
@@ -400,6 +405,22 @@ fn restart(store: &SessionStore, name: &str, worktree_path: &Path) -> Result<()>
         .get(name)
         .map(|s| s.command.clone())
         .unwrap_or_else(|| agent::default_preset().command.to_string());
+    if let Some(running) = tmux::list_sessions()?
+        .into_iter()
+        .find(|running| running.name == name)
+    {
+        if running.session_path != worktree_path {
+            anyhow::bail!(
+                "tmux session '{name}' belongs to {}, not {}",
+                running.session_path.display(),
+                worktree_path.display()
+            );
+        }
+        if running.pane_path.exists() {
+            return Ok(());
+        }
+        let _ = tmux::kill_session(name);
+    }
     tmux::new_session(name, worktree_path, &command)
 }
 
