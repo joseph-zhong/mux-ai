@@ -57,6 +57,7 @@ pub fn ensure_server() -> Result<()> {
     let _ = tmux().args(["start-server"]).output();
     let _ = bind_detach_key();
     let _ = configure_status_bar();
+    let _ = configure_mouse();
     let _ = configure_window_sizing();
     Ok(())
 }
@@ -81,6 +82,32 @@ fn configure_status_bar() -> Result<()> {
         "status-left",
         " ctrl-\\ to return to dashboard  [#S] ",
     ]))?;
+    Ok(())
+}
+
+/// Full-screen agents own their viewport and ask the terminal for mouse events. Keep
+/// their redraws in the alternate screen and pass wheel events through to them; for
+/// ordinary shells, retain tmux's copy-mode scrolling fallback.
+fn configure_mouse() -> Result<()> {
+    run_ok(tmux().args(["set-option", "-g", "alternate-screen", "on"]))?;
+    run_ok(tmux().args(["set-option", "-g", "mouse", "on"]))?;
+    for (event, direction) in [
+        ("WheelUpPane", "scroll-up"),
+        ("WheelDownPane", "scroll-down"),
+    ] {
+        let fallback = format!("select-pane -t = ; copy-mode -e ; send-keys -X -N 5 {direction}");
+        run_ok(tmux().args([
+            "bind-key",
+            "-T",
+            "root",
+            event,
+            "if-shell",
+            "-F",
+            "#{mouse_any_flag}",
+            "send-keys -M",
+            &fallback,
+        ]))?;
+    }
     Ok(())
 }
 
@@ -160,6 +187,7 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         // not destroy a usable shell or strand it in a deleted worktree.
         let _ = bind_detach_key();
         let _ = configure_status_bar();
+        let _ = configure_mouse();
         let _ = configure_window_sizing();
 
         // Run the agent inside the pane's interactive shell instead of replacing the
