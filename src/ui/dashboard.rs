@@ -13,6 +13,7 @@ use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crate::session_store::{worktree_root, SessionStore};
@@ -61,6 +62,16 @@ struct Tile {
     agent: Option<String>,
 }
 
+struct CleanupJob {
+    name: String,
+    path: PathBuf,
+}
+
+struct CleanupResult {
+    name: String,
+    result: Result<()>,
+}
+
 struct AppState {
     selected: usize,
     cols: usize,
@@ -72,6 +83,8 @@ struct AppState {
     repo_root: PathBuf,
     /// Installed agent presets, resolved once at startup — PATH doesn't move under us.
     agents: Vec<&'static agent::Agent>,
+    cleanup_tx: Sender<CleanupJob>,
+    cleanup_rx: Receiver<CleanupResult>,
 }
 
 impl AppState {
@@ -153,6 +166,14 @@ pub fn run() -> Result<()> {
 
     let repo_root = crate::worktree::find_repo_root(&std::env::current_dir()?)?;
     let light_bg = detect_light_bg();
+    let pending = worktree::pending_removals(&repo_root)?;
+    let (cleanup_tx, cleanup_rx) = cleanup_worker(repo_root.clone());
+    for item in &pending {
+        let _ = cleanup_tx.send(CleanupJob {
+            name: item.name.clone(),
+            path: item.path.clone(),
+        });
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -166,10 +187,13 @@ pub fn run() -> Result<()> {
         tiles: Vec::new(),
         panes: HashMap::new(),
         mode: Mode::Normal,
-        message: None,
+        message: (!pending.is_empty())
+            .then(|| format!("resuming {} pending cleanup(s)", pending.len())),
         light_bg,
         repo_root,
         agents: agent::available(),
+        cleanup_tx,
+        cleanup_rx,
     };
     let result = event_loop(&mut terminal, &mut store, &mut state);
 
@@ -177,6 +201,44 @@ pub fn run() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     result
+}
+
+/// A single worker keeps recursive deletions off the UI thread and avoids making
+/// concurrent Git mutations. Staged worktrees remain registered if the process exits,
+/// so the next dashboard launch can enqueue them again.
+fn cleanup_worker(repo_root: PathBuf) -> (Sender<CleanupJob>, Receiver<CleanupResult>) {
+    let (job_tx, job_rx) = mpsc::channel::<CleanupJob>();
+    let (result_tx, result_rx) = mpsc::channel::<CleanupResult>();
+    std::thread::spawn(move || {
+        for job in job_rx {
+            let result = worktree::remove_registered(&repo_root, &job.path);
+            let _ = result_tx.send(CleanupResult {
+                name: job.name,
+                result,
+            });
+        }
+    });
+    (job_tx, result_rx)
+}
+
+/// Stop a tmux session even when its pane has already exited. A disappearing session
+/// between the list and kill calls is equivalent to a successful stop.
+fn stop_session(name: &str) -> Result<()> {
+    if !tmux::list_sessions()?
+        .iter()
+        .any(|session| session.name == name)
+    {
+        return Ok(());
+    }
+    if let Err(kill_error) = tmux::kill_session(name) {
+        if tmux::list_sessions()?
+            .iter()
+            .any(|session| session.name == name)
+        {
+            return Err(kill_error);
+        }
+    }
+    Ok(())
 }
 
 fn event_loop(
@@ -188,6 +250,15 @@ fn event_loop(
     let mut last_discover = Instant::now() - DISCOVER_INTERVAL;
 
     loop {
+        while let Ok(cleanup) = state.cleanup_rx.try_recv() {
+            state.message = Some(match cleanup.result {
+                Ok(()) => format!("removed '{}'", cleanup.name),
+                Err(e) => format!(
+                    "cleanup pending for '{}': {e} (will retry next launch)",
+                    cleanup.name
+                ),
+            });
+        }
         if last_discover.elapsed() >= DISCOVER_INTERVAL {
             refresh(state);
             last_discover = Instant::now();
@@ -356,10 +427,50 @@ fn event_loop(
                                 .get(state.selected)
                                 .map(|t| (t.name.clone(), t.worktree_path.clone()))
                             {
-                                let _ = tmux::kill_session(&name);
-                                let _ = worktree::remove(&state.repo_root, &path);
-                                let _ = store.remove(&name);
-                                refresh(state);
+                                if let Err(e) = stop_session(&name) {
+                                    state.message = Some(format!(
+                                        "could not stop '{name}': {e}; worktree was left in place"
+                                    ));
+                                } else {
+                                    match worktree::stage_remove(&state.repo_root, &path) {
+                                        Ok(staged) => {
+                                            state.tiles.remove(state.selected);
+                                            state.panes.remove(&name);
+                                            if state.selected >= state.tiles.len() {
+                                                state.selected =
+                                                    state.tiles.len().saturating_sub(1);
+                                            }
+                                            let queued = state
+                                                .cleanup_tx
+                                                .send(CleanupJob {
+                                                    name: name.clone(),
+                                                    path: staged,
+                                                })
+                                                .is_ok();
+                                            let metadata_removed = store.remove(&name).is_ok();
+                                            state.message = Some(match (queued, metadata_removed) {
+                                                (true, true) => {
+                                                    format!("removing '{name}' in background")
+                                                }
+                                                (false, true) => format!(
+                                                    "'{name}' moved to trash; cleanup will retry next launch"
+                                                ),
+                                                (true, false) => format!(
+                                                    "removing '{name}'; could not update session metadata"
+                                                ),
+                                                (false, false) => format!(
+                                                    "'{name}' moved to trash; cleanup and metadata update are pending"
+                                                ),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            state.message = Some(format!(
+                                                "could not remove '{name}': {e}; worktree was left in place"
+                                            ));
+                                            refresh(state);
+                                        }
+                                    }
+                                }
                             }
                             state.mode = Mode::Normal;
                         }
