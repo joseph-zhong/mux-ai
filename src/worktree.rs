@@ -46,12 +46,8 @@ pub struct Worktree {
     pub path: PathBuf,
 }
 
-/// The worktrees git actually knows about under `<repo>/.muxai/worktrees`. This is the
-/// durable record of a session's work — it survives the agent exiting, the tmux server
-/// restarting, and the session store losing its row.
-pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
+fn list_under(repo_root: &Path, root: &Path) -> Result<Vec<Worktree>> {
     let out = run_ok(git(repo_root).args(["worktree", "list", "--porcelain"]))?;
-    let root = worktree_root(repo_root);
     let mut found = Vec::new();
     let mut path: Option<PathBuf> = None;
     // Porcelain emits one blank-line-terminated block per worktree.
@@ -60,7 +56,7 @@ pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
             path = Some(PathBuf::from(rest));
         } else if line.is_empty() {
             if let Some(p) = path.take() {
-                if let Ok(name) = p.strip_prefix(&root) {
+                if let Ok(name) = p.strip_prefix(root) {
                     if !name.as_os_str().is_empty() {
                         found.push(Worktree {
                             name: name.to_string_lossy().into_owned(),
@@ -72,6 +68,55 @@ pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
         }
     }
     Ok(found)
+}
+
+/// The worktrees git actually knows about under `<repo>/.muxai/worktrees`. This is the
+/// durable record of a session's work — it survives the agent exiting, the tmux server
+/// restarting, and the session store losing its row.
+pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
+    list_under(repo_root, &worktree_root(repo_root))
+}
+
+fn trash_root(repo_root: &Path) -> PathBuf {
+    repo_root.join(".muxai/trash")
+}
+
+/// Moves a worktree out of the dashboard with a same-filesystem rename. The expensive
+/// recursive deletion can then happen in the background. Git continues to register the
+/// staged path, making interrupted cleanup discoverable on the next dashboard launch.
+pub fn stage_remove(repo_root: &Path, path: &Path) -> Result<PathBuf> {
+    let root = worktree_root(repo_root);
+    let name = path
+        .strip_prefix(&root)
+        .with_context(|| format!("refusing to remove worktree outside {}", root.display()))?;
+    if name.as_os_str().is_empty() {
+        bail!("refusing to remove worktree root {}", root.display());
+    }
+    let trash = trash_root(repo_root);
+    let staged = trash.join(name);
+    if staged.exists() {
+        bail!(
+            "cleanup is already pending at {}; retry after it finishes",
+            staged.display()
+        );
+    }
+    if let Some(parent) = staged.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    run_ok(git(repo_root).args([
+        "worktree",
+        "move",
+        "--force",
+        &path.to_string_lossy(),
+        &staged.to_string_lossy(),
+    ]))?;
+    Ok(staged)
+}
+
+/// Staged removals are a durable cleanup queue. They are outside the dashboard's
+/// worktree root but remain registered with Git until deletion completes.
+pub fn pending_removals(repo_root: &Path) -> Result<Vec<Worktree>> {
+    list_under(repo_root, &trash_root(repo_root))
 }
 
 /// Ensures .muxai/ (our worktrees + scratch space) is git-ignored in the host repo.
@@ -125,8 +170,15 @@ pub fn create(repo_root: &Path, name: &str, branch: &str) -> Result<PathBuf> {
 
 pub fn remove(repo_root: &Path, path: &Path) -> Result<()> {
     if path.exists() {
-        run_ok(git(repo_root).args(["worktree", "remove", "--force", &path.to_string_lossy()]))?;
+        remove_registered(repo_root, path)?;
     }
+    Ok(())
+}
+
+/// Removes a path known to be registered even if an earlier attempt deleted its last
+/// directory entry before being interrupted.
+pub fn remove_registered(repo_root: &Path, path: &Path) -> Result<()> {
+    run_ok(git(repo_root).args(["worktree", "remove", "--force", &path.to_string_lossy()]))?;
     Ok(())
 }
 
@@ -193,6 +245,42 @@ mod tests {
         // The bug this guards: from inside a linked worktree, --show-toplevel returns
         // the worktree itself, so the dashboard would look for sessions in the wrong place.
         assert_eq!(find_repo_root(&alpha).unwrap(), repo);
+
+        fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn stages_removal_outside_the_dashboard_then_cleans_it_up() {
+        let repo = tmp_repo();
+        let active = create(&repo, "team/alpha", "team/alpha").unwrap();
+
+        let staged = stage_remove(&repo, &active).unwrap();
+
+        assert!(!active.exists());
+        assert!(staged.exists());
+        assert!(list(&repo).unwrap().is_empty());
+        let pending = pending_removals(&repo).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].name, "team/alpha");
+        assert_eq!(pending[0].path, staged);
+
+        remove_registered(&repo, &staged).unwrap();
+        assert!(!staged.exists());
+        assert!(pending_removals(&repo).unwrap().is_empty());
+
+        fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn staging_failure_leaves_the_active_worktree_in_place() {
+        let repo = tmp_repo();
+        let active = create(&repo, "alpha", "alpha").unwrap();
+        let collision = trash_root(&repo).join("alpha");
+        fs::create_dir_all(&collision).unwrap();
+
+        assert!(stage_remove(&repo, &active).is_err());
+        assert!(active.exists());
+        assert_eq!(list(&repo).unwrap().len(), 1);
 
         fs::remove_dir_all(&repo).unwrap();
     }
