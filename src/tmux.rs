@@ -108,6 +108,13 @@ fn configure_mouse() -> Result<()> {
             &fallback,
         ]))?;
     }
+    // A trackpad can report slight horizontal motion as mouse buttons 6/7. Codex
+    // scrolls only vertically, and a leaked SGR packet starts with Escape — which
+    // interrupts its active turn. Consume horizontal wheel events in tmux while
+    // continuing to forward vertical wheel events above.
+    for event in ["MouseDown6Pane", "MouseDown7Pane"] {
+        run_ok(tmux().args(["bind-key", "-T", "root", event, "select-pane", "-t", "="]))?;
+    }
     Ok(())
 }
 
