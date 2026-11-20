@@ -86,6 +86,7 @@ struct AppState {
     message: Option<String>,
     light_bg: bool,
     repo_roots: Vec<PathBuf>,
+    show_all_worktrees: bool,
     /// Installed agent presets, resolved once at startup — PATH doesn't move under us.
     agents: Vec<&'static agent::Agent>,
     cleanup_tx: Sender<CleanupJob>,
@@ -105,7 +106,11 @@ impl AppState {
 /// Git's worktree registry is the source of truth, so linked worktrees remain visible
 /// regardless of which tool created them or where they live. The session store only
 /// supplies repository scope and optional agent metadata.
-fn discover(repo_roots: &[PathBuf]) -> Result<Vec<Tile>> {
+fn worktree_visible(show_all_worktrees: bool, remembered: bool, running: bool) -> bool {
+    show_all_worktrees || remembered || running
+}
+
+fn discover(repo_roots: &[PathBuf], show_all_worktrees: bool) -> Result<Vec<Tile>> {
     let running = tmux::list_sessions()?;
     let store = SessionStore::load().unwrap_or_default();
     let mut tiles = Vec::new();
@@ -116,20 +121,26 @@ fn discover(repo_roots: &[PathBuf]) -> Result<Vec<Tile>> {
             Err(e) if repo_roots.len() == 1 => return Err(e),
             Err(_) => continue,
         };
-        tiles.extend(worktrees.into_iter().map(|worktree| {
+        tiles.extend(worktrees.into_iter().filter_map(|worktree| {
             let running_session = running.iter().find(|session| {
                 session.session_path == worktree.path && session.pane_path.exists()
             });
-            Tile {
-                agent: store
-                    .get_by_worktree(&worktree.path)
-                    .map(|session| session.agent.clone()),
+            let remembered = store.get_by_worktree(&worktree.path);
+            if !worktree_visible(
+                show_all_worktrees,
+                remembered.is_some(),
+                running_session.is_some(),
+            ) {
+                return None;
+            }
+            Some(Tile {
+                agent: remembered.map(|session| session.agent.clone()),
                 name: worktree.name,
                 repo_root: repo_root.clone(),
                 worktree_path: worktree.path,
                 running: running_session.is_some(),
                 tmux_session: running_session.map(|session| session.name.clone()),
-            }
+            })
         }));
     }
 
@@ -176,7 +187,7 @@ fn discover(repo_roots: &[PathBuf]) -> Result<Vec<Tile>> {
 }
 
 fn refresh(state: &mut AppState) {
-    if let Ok(tiles) = discover(&state.repo_roots) {
+    if let Ok(tiles) = discover(&state.repo_roots, state.show_all_worktrees) {
         replace_tiles(state, tiles);
     }
 }
@@ -207,6 +218,10 @@ fn repository_scope(current_repo: Option<PathBuf>, known_repos: &[PathBuf]) -> V
         .unwrap_or_else(|| known_repos.to_vec())
 }
 
+fn show_all_by_default(current_repo: &Option<PathBuf>) -> bool {
+    current_repo.is_some()
+}
+
 /// Query the terminal's background color (via OSC 11) so we can pick a
 /// selection highlight that stays visible on light-background terminals,
 /// instead of always assuming a dark background.
@@ -221,6 +236,7 @@ pub fn run() -> Result<()> {
     let mut store = SessionStore::load()?;
 
     let current_repo = crate::worktree::find_repo_root_if_any(&std::env::current_dir()?)?;
+    let show_all_worktrees = show_all_by_default(&current_repo);
     if let Some(repo_root) = &current_repo {
         store.remember_repo(repo_root)?;
     }
@@ -264,6 +280,7 @@ pub fn run() -> Result<()> {
             .then(|| format!("resuming {} pending cleanup(s)", pending.len())),
         light_bg,
         repo_roots,
+        show_all_worktrees,
         agents: agent::available(),
         cleanup_tx,
         cleanup_rx,
@@ -366,6 +383,15 @@ fn event_loop(
                         let len = state.tiles.len();
                         match key.code {
                             KeyCode::Char('q') => break,
+                            KeyCode::Char('a') => {
+                                state.show_all_worktrees = !state.show_all_worktrees;
+                                state.message = Some(if state.show_all_worktrees {
+                                    "showing all linked worktrees".to_string()
+                                } else {
+                                    "showing muxai sessions only".to_string()
+                                });
+                                refresh(state);
+                            }
                             KeyCode::Right => {
                                 if len > 0 && state.selected + 1 < len {
                                     state.selected += 1;
@@ -676,12 +702,19 @@ fn draw(f: &mut Frame, state: &mut AppState) {
         ])
         .split(area);
     draw_grid(f, chunks[0], state);
-    draw_commands_line(f, chunks[1]);
+    draw_commands_line(f, chunks[1], state.show_all_worktrees);
     draw_status_line(f, chunks[2], state);
 }
 
-fn draw_commands_line(f: &mut Frame, area: Rect) {
-    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart   n new   k kill   q quit   in session: C-\\ dashboard, C-k kill";
+fn draw_commands_line(f: &mut Frame, area: Rect, show_all_worktrees: bool) {
+    let all = if show_all_worktrees {
+        "a sessions"
+    } else {
+        "a all"
+    };
+    let line = format!(
+        "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart   n new   k kill   {all}   q quit   in session: C-\\ dashboard, C-k kill"
+    );
     f.render_widget(
         Paragraph::new(Line::from(line)).style(Style::default().fg(Color::DarkGray)),
         area,
@@ -767,8 +800,12 @@ fn stale_windows(
 
 fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
     if state.tiles.is_empty() {
-        let msg = Paragraph::new("No worktrees yet. Press 'n' to create one, 'q' to quit.")
-            .style(Style::default().fg(Color::DarkGray));
+        let text = if state.show_all_worktrees {
+            "No worktrees yet. Press 'n' to create one, 'q' to quit."
+        } else {
+            "No muxai sessions. Press 'a' to show all linked worktrees."
+        };
+        let msg = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
         f.render_widget(msg, area);
         return;
     }
@@ -947,6 +984,16 @@ mod tests {
         assert_eq!(repository_scope(None, &known), known);
     }
 
+    #[test]
+    fn global_view_hides_unmanaged_stopped_worktrees_until_requested() {
+        assert!(!show_all_by_default(&None));
+        assert!(show_all_by_default(&Some(PathBuf::from("/code/repo"))));
+        assert!(!worktree_visible(false, false, false));
+        assert!(worktree_visible(false, true, false));
+        assert!(worktree_visible(false, false, true));
+        assert!(worktree_visible(true, false, false));
+    }
+
     fn tagged_tile(agent: Option<&str>, running: bool) -> Tile {
         Tile {
             name: "sess".to_string(),
@@ -1093,6 +1140,7 @@ mod tests {
             message: None,
             light_bg: false,
             repo_roots: vec![PathBuf::from("/tmp")],
+            show_all_worktrees: true,
             agents: Vec::new(),
             cleanup_tx,
             cleanup_rx,

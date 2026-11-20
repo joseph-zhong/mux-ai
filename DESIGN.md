@@ -36,7 +36,9 @@ Rust, single static binary (`muxai`), built on:
 - **git worktree** — one worktree per session, created under
   `<repo>/.muxai/worktrees/<name>` (git-ignored), branch name = session name unless
   overridden. Dashboard discovery uses Git's full linked-worktree registry, so
-  worktrees created elsewhere (including `/private/tmp`) remain visible.
+  worktrees created elsewhere (including `/private/tmp`) remain available. Global
+  dashboards show live/recorded sessions by default and expose the full cleanup
+  inventory behind an explicit toggle.
 - **JSON session store** (`~/.local/state/muxai/sessions.json`) — maps session name →
   `{repo, worktree_path, branch, command, tmux_session, created_at}`. A separate
   `repositories.json` remembers which repositories a dashboard launched outside Git
