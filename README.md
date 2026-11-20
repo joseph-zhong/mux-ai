@@ -63,7 +63,7 @@ xattr -d com.apple.quarantine ./muxai
 
 ## Demo
 
-From inside any git repo:
+Create sessions from inside a git repo:
 
 ```sh
 muxai new demo -- 'echo hello from demo; sleep 300'   # worktree + tmux session
@@ -79,6 +79,16 @@ muxai status         # disk (shared cache vs. reclaimable) + memory, across all 
 muxai reset          # dry run — shows what it would reclaim
 muxai reset --yes    # actually reclaims it
 ```
+
+The dashboard can also be launched from any non-repository directory, including `/`.
+There it shows linked worktrees across every repository muxai has seen. Launching it
+inside a repository keeps the original repository-scoped view. Discovery comes from
+`git worktree list`, so worktrees made by Codex or another tool under `/private/tmp`
+remain visible and can be restarted or removed with the same dashboard controls.
+
+Muxai remembers a repository when you launch the dashboard inside it or create a
+session for it. From a global dashboard, `n` targets the selected worktree's repository;
+when no repository is selectable, use `muxai new <name> --repo <path>` once.
 
 ## Agents
 
