@@ -72,7 +72,7 @@ muxai new demo3 --agent claude                         # a third, running claude
 
 muxai                # opens the grid dashboard
 # arrow keys: move selection    Enter: attach into the session
-# C-q (inside a session): detach back to the dashboard
+# C-\ (inside a session): back to dashboard   C-k: confirm kill
 # n: new session (pick the agent, then name it)   k: kill selected   q: quit
 
 muxai status         # disk (shared cache vs. reclaimable) + memory, across all sessions
@@ -129,8 +129,9 @@ process that shells out to `tmux`/`git` and reads/writes the store.
 
 - **Own tmux socket.** Every mux-ai session runs on `tmux -L muxai`, isolated from your
   normal tmux server — they won't show up in a plain `tmux ls` and your `~/.tmux.conf`
-  is untouched. This is deliberate: it's what lets us rebind a single unprefixed `C-q`
-  to detach without clobbering your own keybindings. To nuke everything mux-ai owns:
+  is untouched. This is deliberate: it's what lets us reserve unprefixed `C-\` to
+  detach and `C-k` to request a confirmed kill without clobbering your own tmux
+  keybindings. To nuke everything mux-ai owns:
   `tmux -L muxai kill-server` (kills the sessions) and remove
   `~/.local/state/muxai/sessions.json` (drops the bookkeeping).
 - **Grid is polled, not streamed.** Each cell redraws from `tmux capture-pane` every
