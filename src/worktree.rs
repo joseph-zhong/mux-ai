@@ -27,6 +27,13 @@ fn run_ok(cmd: &mut Command) -> Result<String> {
 /// `--show-toplevel` returns the linked worktree there, which would make muxai nest
 /// a `.muxai/worktrees` tree inside a worktree and hide the repo's real sessions.
 pub fn find_repo_root(start: &Path) -> Result<PathBuf> {
+    find_repo_root_if_any(start)?
+        .with_context(|| format!("{} is not inside a git repository", start.display()))
+}
+
+/// The main worktree root when `start` belongs to a repository, or `None` for an
+/// ordinary directory. Failures to execute Git are still surfaced.
+pub fn find_repo_root_if_any(start: &Path) -> Result<Option<PathBuf>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(start)
@@ -34,11 +41,11 @@ pub fn find_repo_root(start: &Path) -> Result<PathBuf> {
         .output()
         .context("running git rev-parse")?;
     if !out.status.success() {
-        bail!("{} is not inside a git repository", start.display());
+        return Ok(None);
     }
     // <root>/.git -> <root>
     let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-    Ok(common.parent().unwrap_or(&common).to_path_buf())
+    Ok(Some(common.parent().unwrap_or(&common).to_path_buf()))
 }
 
 pub struct Worktree {
@@ -77,6 +84,40 @@ pub fn list(repo_root: &Path) -> Result<Vec<Worktree>> {
     list_under(repo_root, &worktree_root(repo_root))
 }
 
+/// Every active linked worktree Git knows about, regardless of where it was created.
+/// The main checkout and worktrees already staged for background removal are excluded.
+pub fn list_all(repo_root: &Path) -> Result<Vec<Worktree>> {
+    let out = run_ok(git(repo_root).args(["worktree", "list", "--porcelain"]))?;
+    let managed_root = worktree_root(repo_root);
+    let trash = trash_root(repo_root);
+    let mut found = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    for line in out.lines().chain(std::iter::once("")) {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(rest));
+        } else if line.is_empty() {
+            if let Some(path) = path.take() {
+                if path == repo_root || path.starts_with(&trash) {
+                    continue;
+                }
+                let name = path
+                    .strip_prefix(&managed_root)
+                    .ok()
+                    .filter(|name| !name.as_os_str().is_empty())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .or_else(|| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    });
+                if let Some(name) = name {
+                    found.push(Worktree { name, path });
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn trash_root(repo_root: &Path) -> PathBuf {
     repo_root.join(".muxai/trash")
 }
@@ -88,7 +129,11 @@ pub fn stage_remove(repo_root: &Path, path: &Path) -> Result<PathBuf> {
     let root = worktree_root(repo_root);
     let name = path
         .strip_prefix(&root)
-        .with_context(|| format!("refusing to remove worktree outside {}", root.display()))?;
+        .ok()
+        .filter(|name| !name.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| path.file_name().map(PathBuf::from))
+        .with_context(|| format!("could not name worktree {}", path.display()))?;
     if name.as_os_str().is_empty() {
         bail!("refusing to remove worktree root {}", root.display());
     }
@@ -226,8 +271,9 @@ mod tests {
             .unwrap()
             .success());
         create(&repo, "orphaned", "orphaned").unwrap();
-        // A worktree outside .muxai/worktrees belongs to the user, not to muxai.
-        let outside = repo.join("elsewhere");
+        // A worktree outside .muxai/worktrees may have been created by Codex or
+        // another tool. It is hidden from the managed-only list but visible globally.
+        let outside = repo.with_extension("external-worktree");
         run_ok(git(&repo).args([
             "worktree",
             "add",
@@ -242,10 +288,27 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["alpha", "beta", "orphaned", "team/gamma"]);
 
+        let mut all_names: Vec<String> = list_all(&repo)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        all_names.sort();
+        let mut expected = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "orphaned".to_string(),
+            "team/gamma".to_string(),
+            outside.file_name().unwrap().to_string_lossy().into_owned(),
+        ];
+        expected.sort();
+        assert_eq!(all_names, expected);
+
         // The bug this guards: from inside a linked worktree, --show-toplevel returns
         // the worktree itself, so the dashboard would look for sessions in the wrong place.
         assert_eq!(find_repo_root(&alpha).unwrap(), repo);
 
+        remove_registered(&repo, &outside).unwrap();
         fs::remove_dir_all(&repo).unwrap();
     }
 
@@ -267,6 +330,31 @@ mod tests {
         remove_registered(&repo, &staged).unwrap();
         assert!(!staged.exists());
         assert!(pending_removals(&repo).unwrap().is_empty());
+
+        fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn stages_an_external_worktree_for_the_same_background_cleanup() {
+        let repo = tmp_repo();
+        let external = repo.with_extension("external-worktree");
+        run_ok(git(&repo).args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "external",
+            &external.to_string_lossy(),
+        ]))
+        .unwrap();
+
+        let staged = stage_remove(&repo, &external).unwrap();
+
+        assert!(!external.exists());
+        assert!(staged.exists());
+        assert!(list_all(&repo).unwrap().is_empty());
+        remove_registered(&repo, &staged).unwrap();
+        assert!(!staged.exists());
 
         fs::remove_dir_all(&repo).unwrap();
     }

@@ -35,11 +35,15 @@ Rust, single static binary (`muxai`), built on:
   detaches back to the dashboard, full stop.
 - **git worktree** — one worktree per session, created under
   `<repo>/.muxai/worktrees/<name>` (git-ignored), branch name = session name unless
-  overridden.
+  overridden. Dashboard discovery uses Git's full linked-worktree registry, so
+  worktrees created elsewhere (including `/private/tmp`) remain available. Global
+  dashboards show live/recorded sessions by default and expose the full cleanup
+  inventory behind an explicit toggle.
 - **JSON session store** (`~/.local/state/muxai/sessions.json`) — maps session name →
-  `{repo, worktree_path, branch, command, tmux_session, created_at}`. Source of truth
-  for what mux-ai manages; tmux/git are re-queried live and reconciled against it
-  (handles sessions killed outside mux-ai).
+  `{repo, worktree_path, branch, command, tmux_session, created_at}`. A separate
+  `repositories.json` remembers which repositories a dashboard launched outside Git
+  should query. Git is the source of truth for linked worktrees; tmux is re-queried
+  live for running sessions.
 
 No daemon. Every `muxai` invocation is a fresh process that shells out to `tmux`/`git`
 and reads/writes the JSON store. Simplicity over a client/server split — revisit only
@@ -138,7 +142,8 @@ In:
 - `muxai` (no args) / `muxai dashboard` — grid dashboard: live capture-pane tiles,
   arrow-key selection, Enter to attach, `n` new session (picks the agent from those
   installed, then prompts for a name), `k` kill selected
-  (with confirmation), `q` quit.
+  (with confirmation), `q` quit. Inside Git it is repository-scoped; outside Git it
+  covers all remembered repositories.
 - `muxai kill <name>` — kill tmux session; prompts to also remove the worktree.
 - `muxai status` — disk (shared vs reclaimable split) + memory rollup, red/yellow/green.
 - `muxai reset [--yes]` — reclaim per-worktree build dirs, prune worktrees, clean
