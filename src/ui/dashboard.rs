@@ -144,7 +144,22 @@ fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
 
 fn refresh(state: &mut AppState) {
     if let Ok(tiles) = discover(&state.repo_root) {
-        state.tiles = tiles;
+        replace_tiles(state, tiles);
+    }
+}
+
+fn replace_tiles(state: &mut AppState, tiles: Vec<Tile>) {
+    let selected_name = state
+        .tiles
+        .get(state.selected)
+        .map(|tile| tile.name.clone());
+    state.tiles = tiles;
+    if let Some(selected) = selected_name
+        .as_deref()
+        .and_then(|name| state.tiles.iter().position(|tile| tile.name == name))
+    {
+        state.selected = selected;
+        return;
     }
     if state.selected >= state.tiles.len() {
         state.selected = state.tiles.len().saturating_sub(1);
@@ -499,10 +514,15 @@ fn attach_session(
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.clear()?;
-    if let Err(e) = attach_result {
-        state.message = Some(format!("attach error: {e}"));
-    }
     refresh(state);
+    if let Some(selected) = state.tiles.iter().position(|tile| tile.name == name) {
+        state.selected = selected;
+    }
+    match attach_result {
+        Ok(tmux::AttachOutcome::Detached) => {}
+        Ok(tmux::AttachOutcome::KillRequested) => state.mode = Mode::ConfirmKill,
+        Err(e) => state.message = Some(format!("attach error: {e}")),
+    }
     Ok(())
 }
 
@@ -551,7 +571,7 @@ fn draw(f: &mut Frame, state: &mut AppState) {
 }
 
 fn draw_commands_line(f: &mut Frame, area: Rect) {
-    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart (C-\\ in session returns here)   n new   k kill   q quit";
+    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart   n new   k kill   q quit   in session: C-\\ dashboard, C-k kill";
     f.render_widget(
         Paragraph::new(Line::from(line)).style(Style::default().fg(Color::DarkGray)),
         area,
@@ -909,5 +929,36 @@ mod tests {
         assert_eq!(grid_area(Size::new(132, 100)), area(132, 98));
         // Degenerate terminal: no underflow panic.
         assert_eq!(grid_area(Size::new(132, 1)).height, 0);
+    }
+
+    #[test]
+    fn refresh_keeps_the_same_session_selected_when_tiles_move() {
+        let (cleanup_tx, _cleanup_jobs) = mpsc::channel();
+        let (_cleanup_results, cleanup_rx) = mpsc::channel();
+        let mut state = AppState {
+            selected: 1,
+            cols: 1,
+            tiles: vec![tile("beta", true), tile("gamma", true)],
+            panes: HashMap::new(),
+            mode: Mode::Normal,
+            message: None,
+            light_bg: false,
+            repo_root: PathBuf::from("/tmp"),
+            agents: Vec::new(),
+            cleanup_tx,
+            cleanup_rx,
+        };
+
+        replace_tiles(
+            &mut state,
+            vec![
+                tile("alpha", true),
+                tile("beta", true),
+                tile("gamma", false),
+            ],
+        );
+
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.tiles[state.selected].name, "gamma");
     }
 }

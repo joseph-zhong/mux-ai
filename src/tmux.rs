@@ -4,10 +4,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// mux-ai runs its own tmux server on a dedicated socket, isolated from the user's
-/// normal tmux config and sessions. This is what lets us rebind a single, unprefixed
-/// detach key (C-\) server-wide without touching ~/.tmux.conf.
+/// normal tmux config and sessions. This is what lets us reserve unprefixed control
+/// keys server-wide without touching ~/.tmux.conf.
 const SOCKET: &str = "muxai";
 const DETACH_KEY: &str = "C-\\";
+const KILL_KEY: &str = "C-k";
+const KILL_REQUEST_OPTION: &str = "@muxai-kill-requested";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttachOutcome {
+    Detached,
+    KillRequested,
+}
 
 pub struct LiveSession {
     pub name: String,
@@ -55,17 +63,44 @@ pub fn ensure_available() -> Result<()> {
 /// re-applies the bind right after creating a session, which does keep the server up.
 pub fn ensure_server() -> Result<()> {
     let _ = tmux().args(["start-server"]).output();
-    let _ = bind_detach_key();
+    let _ = bind_reserved_keys();
     let _ = configure_status_bar();
     let _ = configure_mouse();
     let _ = configure_window_sizing();
     Ok(())
 }
 
-/// -n binds with no prefix key, so C-\ detaches directly from inside any session.
-fn bind_detach_key() -> Result<()> {
+/// -n binds with no prefix key. C-\ detaches; C-k asks the dashboard to run its
+/// existing confirmed kill flow by marking the current session before detaching.
+fn bind_reserved_keys() -> Result<()> {
     run_ok(tmux().args(["bind-key", "-n", DETACH_KEY, "detach-client"]))?;
+    run_ok(tmux().args([
+        "bind-key",
+        "-n",
+        KILL_KEY,
+        "set-option",
+        KILL_REQUEST_OPTION,
+        "1",
+        "\\;",
+        "detach-client",
+    ]))?;
     Ok(())
+}
+
+fn clear_kill_request(name: &str) -> Result<()> {
+    run_ok(tmux().args(["set-option", "-u", "-t", name, KILL_REQUEST_OPTION]))?;
+    Ok(())
+}
+
+fn take_kill_request(name: &str) -> Result<bool> {
+    let out = tmux()
+        .args(["show-options", "-v", "-t", name, KILL_REQUEST_OPTION])
+        .output()?;
+    if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "1" {
+        return Ok(false);
+    }
+    clear_kill_request(name)?;
+    Ok(true)
 }
 
 /// Once attached, a session owns the whole screen and our dashboard's own
@@ -73,14 +108,14 @@ fn bind_detach_key() -> Result<()> {
 /// live in tmux's own status line instead, which stays on screen no matter
 /// which pane is attached.
 fn configure_status_bar() -> Result<()> {
-    // status-left-length defaults to 10, which truncates our hint before the
+    // status-left-length defaults to 10, which truncates our shortcuts before the
     // session name even starts rendering.
-    run_ok(tmux().args(["set-option", "-g", "status-left-length", "40"]))?;
+    run_ok(tmux().args(["set-option", "-g", "status-left-length", "80"]))?;
     run_ok(tmux().args([
         "set-option",
         "-g",
         "status-left",
-        " ctrl-\\ to return to dashboard  [#S] ",
+        " ctrl-\\ dashboard  ctrl-k kill  [#S] ",
     ]))?;
     Ok(())
 }
@@ -192,7 +227,7 @@ pub fn new_session(name: &str, cwd: &Path, command: &str) -> Result<()> {
         // The server is now guaranteed to have a live session, so these are guaranteed
         // to target it. UI configuration is best-effort: a failed keybind or hook must
         // not destroy a usable shell or strand it in a deleted worktree.
-        let _ = bind_detach_key();
+        let _ = bind_reserved_keys();
         let _ = configure_status_bar();
         let _ = configure_mouse();
         let _ = configure_window_sizing();
@@ -325,12 +360,15 @@ pub fn pane_pid(name: &str) -> Result<Option<u32>> {
 }
 
 /// Hands the real terminal to tmux for an interactive attach. Blocks until the user
-/// detaches (C-\, bound above) or the session ends. Caller is responsible for
+/// detaches, requests a kill, or the session ends. Caller is responsible for
 /// suspending/resuming its own raw-mode TUI around this call.
-pub fn attach(name: &str) -> Result<()> {
+pub fn attach(name: &str) -> Result<AttachOutcome> {
     // The client-attached hook resizes the window to the real terminal as soon as
     // this client lands, undoing the tile size we imposed for the grid. The dashboard
     // re-imposes tile sizes once it has the screen back.
+    // A dashboard interrupted immediately after a previous C-k may have left the
+    // marker behind. Only a request made during this attach should count.
+    let _ = clear_kill_request(name);
     let child = tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())
@@ -338,6 +376,9 @@ pub fn attach(name: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()?;
     let out = child.wait_with_output()?;
+    if take_kill_request(name)? {
+        return Ok(AttachOutcome::KillRequested);
+    }
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let reason = stderr.trim();
@@ -346,7 +387,7 @@ pub fn attach(name: &str) -> Result<()> {
         }
         bail!("tmux attach-session -t {name}: {reason}");
     }
-    Ok(())
+    Ok(AttachOutcome::Detached)
 }
 
 pub fn kill_session(name: &str) -> Result<()> {
