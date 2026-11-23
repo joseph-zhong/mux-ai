@@ -45,10 +45,12 @@ enum Mode {
     /// and skipping it is what made every new session a claude session.
     NewAgent {
         agent: usize,
+        repo_root: PathBuf,
     },
     NewInput {
         name: String,
         agent: usize,
+        repo_root: PathBuf,
     },
     ConfirmKill,
 }
@@ -56,14 +58,17 @@ enum Mode {
 /// One dashboard cell. Derived from durable state, not from the session store.
 struct Tile {
     name: String,
+    repo_root: PathBuf,
     worktree_path: PathBuf,
     running: bool,
+    tmux_session: Option<String>,
     /// Agent preset from the session store, absent when that record was lost.
     agent: Option<String>,
 }
 
 struct CleanupJob {
     name: String,
+    repo_root: PathBuf,
     path: PathBuf,
 }
 
@@ -80,7 +85,8 @@ struct AppState {
     mode: Mode,
     message: Option<String>,
     light_bg: bool,
-    repo_root: PathBuf,
+    repo_roots: Vec<PathBuf>,
+    show_all_worktrees: bool,
     /// Installed agent presets, resolved once at startup — PATH doesn't move under us.
     agents: Vec<&'static agent::Agent>,
     cleanup_tx: Sender<CleanupJob>,
@@ -97,73 +103,123 @@ impl AppState {
     }
 }
 
-/// What the dashboard shows is git's worktree list plus tmux's live session list —
-/// both durable — never the session store, which is only a metadata cache: several
-/// muxai processes overwrite it, and it used to be pruned on tmux liveness, which
-/// deleted the only record of a worktree the moment its agent exited. A session with
-/// no live tmux session stays visible as a stopped tile so its work is still reachable.
-fn discover(repo_root: &Path) -> Result<Vec<Tile>> {
-    let root = worktree_root(repo_root);
-    let running = tmux::list_sessions()?;
-    // Re-read rather than reuse the caller's copy: another muxai process may have
-    // added a session since, and the agent tag is only in the store.
-    let store = SessionStore::load().unwrap_or_default();
-    let agent_of = |name: &str| store.get(name).map(|s| s.agent.clone());
+/// Git's worktree registry is the source of truth, so linked worktrees remain visible
+/// regardless of which tool created them or where they live. The session store only
+/// supplies repository scope and optional agent metadata.
+fn worktree_visible(show_all_worktrees: bool, remembered: bool, running: bool) -> bool {
+    show_all_worktrees || remembered || running
+}
 
-    let mut tiles: Vec<Tile> = worktree::list(repo_root)?
-        .into_iter()
-        .map(|w| Tile {
-            running: running
-                .iter()
-                .any(|session| session.name == w.name && session.pane_path.exists()),
-            agent: agent_of(&w.name),
-            name: w.name,
-            worktree_path: w.path,
-        })
-        .collect();
+fn discover(repo_roots: &[PathBuf], show_all_worktrees: bool) -> Result<Vec<Tile>> {
+    let running = tmux::list_sessions()?;
+    let store = SessionStore::load().unwrap_or_default();
+    let mut tiles = Vec::new();
+
+    for repo_root in repo_roots {
+        let worktrees = match worktree::list_all(repo_root) {
+            Ok(worktrees) => worktrees,
+            Err(e) if repo_roots.len() == 1 => return Err(e),
+            Err(_) => continue,
+        };
+        tiles.extend(worktrees.into_iter().filter_map(|worktree| {
+            let running_session = running.iter().find(|session| {
+                session.session_path == worktree.path && session.pane_path.exists()
+            });
+            let remembered = store.get_by_worktree(&worktree.path);
+            if !worktree_visible(
+                show_all_worktrees,
+                remembered.is_some(),
+                running_session.is_some(),
+            ) {
+                return None;
+            }
+            Some(Tile {
+                agent: remembered.map(|session| session.agent.clone()),
+                name: worktree.name,
+                repo_root: repo_root.clone(),
+                worktree_path: worktree.path,
+                running: running_session.is_some(),
+                tmux_session: running_session.map(|session| session.name.clone()),
+            })
+        }));
+    }
 
     // A live session whose worktree was deleted underneath it still has a running
     // agent in it, so it needs a tile too.
     for session in running {
-        if session.pane_path.exists()
-            && session.session_path.starts_with(&root)
-            && !tiles.iter().any(|t| t.name == session.name)
+        if !session.pane_path.exists()
+            || tiles
+                .iter()
+                .any(|tile| tile.worktree_path == session.session_path)
         {
+            continue;
+        }
+        let repo_root = store
+            .get(&session.name)
+            .filter(|saved| saved.worktree_path == session.session_path)
+            .map(|saved| saved.repo_root.clone())
+            .or_else(|| {
+                repo_roots
+                    .iter()
+                    .find(|repo| {
+                        session.session_path.parent() == Some(worktree_root(repo).as_path())
+                    })
+                    .cloned()
+            });
+        if let Some(repo_root) = repo_root.filter(|repo| repo_roots.contains(repo)) {
             tiles.push(Tile {
-                agent: agent_of(&session.name),
-                name: session.name,
+                agent: store.get(&session.name).map(|saved| saved.agent.clone()),
+                name: session.name.clone(),
+                repo_root,
                 worktree_path: session.session_path,
                 running: true,
+                tmux_session: Some(session.name),
             });
         }
     }
 
-    tiles.sort_by(|a, b| a.name.cmp(&b.name));
+    tiles.sort_by(|a, b| {
+        a.repo_root
+            .cmp(&b.repo_root)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     Ok(tiles)
 }
 
 fn refresh(state: &mut AppState) {
-    if let Ok(tiles) = discover(&state.repo_root) {
+    if let Ok(tiles) = discover(&state.repo_roots, state.show_all_worktrees) {
         replace_tiles(state, tiles);
     }
 }
 
 fn replace_tiles(state: &mut AppState, tiles: Vec<Tile>) {
-    let selected_name = state
+    let selected_path = state
         .tiles
         .get(state.selected)
-        .map(|tile| tile.name.clone());
+        .map(|tile| tile.worktree_path.clone());
     state.tiles = tiles;
-    if let Some(selected) = selected_name
-        .as_deref()
-        .and_then(|name| state.tiles.iter().position(|tile| tile.name == name))
-    {
+    if let Some(selected) = selected_path.as_deref().and_then(|path| {
+        state
+            .tiles
+            .iter()
+            .position(|tile| tile.worktree_path == path)
+    }) {
         state.selected = selected;
         return;
     }
     if state.selected >= state.tiles.len() {
         state.selected = state.tiles.len().saturating_sub(1);
     }
+}
+
+fn repository_scope(current_repo: Option<PathBuf>, known_repos: &[PathBuf]) -> Vec<PathBuf> {
+    current_repo
+        .map(|repo| vec![repo])
+        .unwrap_or_else(|| known_repos.to_vec())
+}
+
+fn show_all_by_default(current_repo: &Option<PathBuf>) -> bool {
+    current_repo.is_some()
 }
 
 /// Query the terminal's background color (via OSC 11) so we can pick a
@@ -179,13 +235,31 @@ pub fn run() -> Result<()> {
     tmux::ensure_server()?;
     let mut store = SessionStore::load()?;
 
-    let repo_root = crate::worktree::find_repo_root(&std::env::current_dir()?)?;
+    let current_repo = crate::worktree::find_repo_root_if_any(&std::env::current_dir()?)?;
+    let show_all_worktrees = show_all_by_default(&current_repo);
+    if let Some(repo_root) = &current_repo {
+        store.remember_repo(repo_root)?;
+    }
+    let repo_roots = repository_scope(current_repo, store.repositories());
     let light_bg = detect_light_bg();
-    let pending = worktree::pending_removals(&repo_root)?;
-    let (cleanup_tx, cleanup_rx) = cleanup_worker(repo_root.clone());
+    let mut pending = Vec::new();
+    for repo_root in &repo_roots {
+        let items = match worktree::pending_removals(repo_root) {
+            Ok(items) => items,
+            Err(error) if repo_roots.len() == 1 => return Err(error),
+            Err(_) => continue,
+        };
+        pending.extend(items.into_iter().map(|item| CleanupJob {
+            name: item.name,
+            repo_root: repo_root.clone(),
+            path: item.path,
+        }));
+    }
+    let (cleanup_tx, cleanup_rx) = cleanup_worker();
     for item in &pending {
         let _ = cleanup_tx.send(CleanupJob {
             name: item.name.clone(),
+            repo_root: item.repo_root.clone(),
             path: item.path.clone(),
         });
     }
@@ -205,7 +279,8 @@ pub fn run() -> Result<()> {
         message: (!pending.is_empty())
             .then(|| format!("resuming {} pending cleanup(s)", pending.len())),
         light_bg,
-        repo_root,
+        repo_roots,
+        show_all_worktrees,
         agents: agent::available(),
         cleanup_tx,
         cleanup_rx,
@@ -221,12 +296,12 @@ pub fn run() -> Result<()> {
 /// A single worker keeps recursive deletions off the UI thread and avoids making
 /// concurrent Git mutations. Staged worktrees remain registered if the process exits,
 /// so the next dashboard launch can enqueue them again.
-fn cleanup_worker(repo_root: PathBuf) -> (Sender<CleanupJob>, Receiver<CleanupResult>) {
+fn cleanup_worker() -> (Sender<CleanupJob>, Receiver<CleanupResult>) {
     let (job_tx, job_rx) = mpsc::channel::<CleanupJob>();
     let (result_tx, result_rx) = mpsc::channel::<CleanupResult>();
     std::thread::spawn(move || {
         for job in job_rx {
-            let result = worktree::remove_registered(&repo_root, &job.path);
+            let result = worktree::remove_registered(&job.repo_root, &job.path);
             let _ = result_tx.send(CleanupResult {
                 name: job.name,
                 result,
@@ -285,8 +360,7 @@ fn event_loop(
             let live: Vec<String> = state
                 .tiles
                 .iter()
-                .filter(|t| t.running)
-                .map(|t| t.name.clone())
+                .filter_map(|tile| tile.tmux_session.clone())
                 .collect();
             for name in live {
                 if let Ok(text) = tmux::capture_pane(&name, PANE_LINES) {
@@ -309,6 +383,15 @@ fn event_loop(
                         let len = state.tiles.len();
                         match key.code {
                             KeyCode::Char('q') => break,
+                            KeyCode::Char('a') => {
+                                state.show_all_worktrees = !state.show_all_worktrees;
+                                state.message = Some(if state.show_all_worktrees {
+                                    "showing all linked worktrees".to_string()
+                                } else {
+                                    "showing muxai sessions only".to_string()
+                                });
+                                refresh(state);
+                            }
                             KeyCode::Right => {
                                 if len > 0 && state.selected + 1 < len {
                                     state.selected += 1;
@@ -330,29 +413,47 @@ fn event_loop(
                                 }
                             }
                             KeyCode::Enter => {
-                                let Some((name, path, running)) = state
-                                    .tiles
-                                    .get(state.selected)
-                                    .map(|t| (t.name.clone(), t.worktree_path.clone(), t.running))
+                                let Some((path, tmux_session)) =
+                                    state.tiles.get(state.selected).map(|tile| {
+                                        (tile.worktree_path.clone(), tile.tmux_session.clone())
+                                    })
                                 else {
                                     continue;
                                 };
-                                if !running {
-                                    match restart(store, &name, &path) {
-                                        Ok(()) => {
-                                            state.message = Some(format!("restarted '{name}'"))
+                                let name = if let Some(name) = tmux_session {
+                                    name
+                                } else {
+                                    match restart(store, &path) {
+                                        Ok(name) => {
+                                            state.message = Some(format!("restarted '{name}'"));
+                                            name
                                         }
                                         Err(e) => {
                                             state.message = Some(format!("restart error: {e}"));
                                             continue;
                                         }
                                     }
-                                }
+                                };
                                 attach_name = Some(name);
                             }
                             KeyCode::Char('n') => {
-                                state.mode = match state.agents.len() {
-                                    0 => {
+                                let repo_root = state
+                                    .tiles
+                                    .get(state.selected)
+                                    .map(|tile| tile.repo_root.clone())
+                                    .or_else(|| {
+                                        (state.repo_roots.len() == 1)
+                                            .then(|| state.repo_roots[0].clone())
+                                    });
+                                state.mode = match (state.agents.len(), repo_root) {
+                                    (_, None) => {
+                                        state.message = Some(
+                                            "no target repository; use `muxai new --repo <path>`"
+                                                .to_string(),
+                                        );
+                                        Mode::Normal
+                                    }
+                                    (0, Some(_)) => {
                                         state.message = Some(format!(
                                             "no agent installed — looked for {} on PATH",
                                             agent::all_names().join(", ")
@@ -360,11 +461,15 @@ fn event_loop(
                                         Mode::Normal
                                     }
                                     // Nothing to choose between: go straight to the name.
-                                    1 => Mode::NewInput {
+                                    (1, Some(repo_root)) => Mode::NewInput {
                                         name: String::new(),
                                         agent: 0,
+                                        repo_root,
                                     },
-                                    _ => Mode::NewAgent { agent: 0 },
+                                    (_, Some(repo_root)) => Mode::NewAgent {
+                                        agent: 0,
+                                        repo_root,
+                                    },
                                 };
                             }
                             KeyCode::Char('k') if len > 0 => {
@@ -373,7 +478,7 @@ fn event_loop(
                             _ => {}
                         }
                     }
-                    Mode::NewAgent { agent } => {
+                    Mode::NewAgent { agent, repo_root } => {
                         let len = state.agents.len();
                         match key.code {
                             KeyCode::Right | KeyCode::Tab => *agent = (*agent + 1) % len,
@@ -390,21 +495,27 @@ fn event_loop(
                                 state.mode = Mode::NewInput {
                                     name: String::new(),
                                     agent,
+                                    repo_root: repo_root.clone(),
                                 };
                             }
                             KeyCode::Esc => state.mode = Mode::Normal,
                             _ => {}
                         }
                     }
-                    Mode::NewInput { name: buf, agent } => match key.code {
+                    Mode::NewInput {
+                        name: buf,
+                        agent,
+                        repo_root,
+                    } => match key.code {
                         KeyCode::Enter => {
                             let name = buf.trim().to_string();
                             let preset = state.agents[*agent];
+                            let repo_root = repo_root.clone();
                             state.mode = Mode::Normal;
                             if !name.is_empty() {
                                 match create_session(
                                     store,
-                                    &state.repo_root,
+                                    &repo_root,
                                     &name,
                                     None,
                                     preset.name,
@@ -437,20 +548,29 @@ fn event_loop(
                     },
                     Mode::ConfirmKill => match key.code {
                         KeyCode::Char('y') => {
-                            if let Some((name, path)) = state
-                                .tiles
-                                .get(state.selected)
-                                .map(|t| (t.name.clone(), t.worktree_path.clone()))
+                            if let Some((name, repo_root, path, tmux_session)) =
+                                state.tiles.get(state.selected).map(|tile| {
+                                    (
+                                        tile.name.clone(),
+                                        tile.repo_root.clone(),
+                                        tile.worktree_path.clone(),
+                                        tile.tmux_session.clone(),
+                                    )
+                                })
                             {
-                                if let Err(e) = stop_session(&name) {
+                                let stop_result =
+                                    tmux_session.as_deref().map(stop_session).transpose();
+                                if let Err(e) = stop_result {
                                     state.message = Some(format!(
                                         "could not stop '{name}': {e}; worktree was left in place"
                                     ));
                                 } else {
-                                    match worktree::stage_remove(&state.repo_root, &path) {
+                                    match worktree::stage_remove(&repo_root, &path) {
                                         Ok(staged) => {
                                             state.tiles.remove(state.selected);
-                                            state.panes.remove(&name);
+                                            if let Some(tmux_session) = &tmux_session {
+                                                state.panes.remove(tmux_session);
+                                            }
                                             if state.selected >= state.tiles.len() {
                                                 state.selected =
                                                     state.tiles.len().saturating_sub(1);
@@ -459,10 +579,12 @@ fn event_loop(
                                                 .cleanup_tx
                                                 .send(CleanupJob {
                                                     name: name.clone(),
+                                                    repo_root,
                                                     path: staged,
                                                 })
                                                 .is_ok();
-                                            let metadata_removed = store.remove(&name).is_ok();
+                                            let metadata_removed =
+                                                store.remove_by_worktree(&path).is_ok();
                                             state.message = Some(match (queued, metadata_removed) {
                                                 (true, true) => {
                                                     format!("removing '{name}' in background")
@@ -515,7 +637,11 @@ fn attach_session(
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.clear()?;
     refresh(state);
-    if let Some(selected) = state.tiles.iter().position(|tile| tile.name == name) {
+    if let Some(selected) = state
+        .tiles
+        .iter()
+        .position(|tile| tile.tmux_session.as_deref() == Some(name))
+    {
         state.selected = selected;
     }
     match attach_result {
@@ -528,13 +654,22 @@ fn attach_session(
 
 /// Bring a stopped session back up in its existing worktree, reusing the command the
 /// store remembers for it (falling back to the default agent if that record was lost).
-fn restart(store: &SessionStore, name: &str, worktree_path: &Path) -> Result<()> {
+fn restart(store: &SessionStore, worktree_path: &Path) -> Result<String> {
     if !worktree_path.exists() {
         anyhow::bail!("worktree {} no longer exists", worktree_path.display());
     }
-    let command = store
-        .get(name)
-        .map(|s| s.command.clone())
+    let remembered = store.get_by_worktree(worktree_path);
+    let name = remembered
+        .map(|session| session.name.clone())
+        .or_else(|| {
+            worktree_path
+                .file_name()
+                .map(|name| tmux::sanitize_name(&name.to_string_lossy()))
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "muxai".to_string());
+    let command = remembered
+        .map(|session| session.command.clone())
         .unwrap_or_else(|| agent::default_preset().command.to_string());
     if let Some(running) = tmux::list_sessions()?
         .into_iter()
@@ -548,11 +683,12 @@ fn restart(store: &SessionStore, name: &str, worktree_path: &Path) -> Result<()>
             );
         }
         if running.pane_path.exists() {
-            return Ok(());
+            return Ok(name);
         }
-        let _ = tmux::kill_session(name);
+        let _ = tmux::kill_session(&name);
     }
-    tmux::new_session(name, worktree_path, &command)
+    tmux::new_session(&name, worktree_path, &command)?;
+    Ok(name)
 }
 
 fn draw(f: &mut Frame, state: &mut AppState) {
@@ -566,12 +702,19 @@ fn draw(f: &mut Frame, state: &mut AppState) {
         ])
         .split(area);
     draw_grid(f, chunks[0], state);
-    draw_commands_line(f, chunks[1]);
+    draw_commands_line(f, chunks[1], state.show_all_worktrees);
     draw_status_line(f, chunks[2], state);
 }
 
-fn draw_commands_line(f: &mut Frame, area: Rect) {
-    let line = "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart   n new   k kill   q quit   in session: C-\\ dashboard, C-k kill";
+fn draw_commands_line(f: &mut Frame, area: Rect, show_all_worktrees: bool) {
+    let all = if show_all_worktrees {
+        "a sessions"
+    } else {
+        "a all"
+    };
+    let line = format!(
+        "\u{2191}\u{2193}\u{2190}\u{2192} select   Enter attach/restart   n new   k kill   {all}   q quit   in session: C-\\ dashboard, C-k kill"
+    );
     f.render_widget(
         Paragraph::new(Line::from(line)).style(Style::default().fg(Color::DarkGray)),
         area,
@@ -646,19 +789,23 @@ fn stale_windows(
 ) -> Vec<String> {
     tiles
         .iter()
-        .filter(|t| t.running)
-        .filter(|t| match live.get(&t.name) {
+        .filter_map(|tile| tile.tmux_session.as_ref().map(|session| (tile, session)))
+        .filter(|(_, session)| match live.get(*session) {
             Some(&(w, h, attached)) => !attached && (w, h) != target,
             None => false,
         })
-        .map(|t| t.name.clone())
+        .map(|(_, session)| session.clone())
         .collect()
 }
 
 fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
     if state.tiles.is_empty() {
-        let msg = Paragraph::new("No worktrees yet. Press 'n' to create one, 'q' to quit.")
-            .style(Style::default().fg(Color::DarkGray));
+        let text = if state.show_all_worktrees {
+            "No worktrees yet. Press 'n' to create one, 'q' to quit."
+        } else {
+            "No muxai sessions. Press 'a' to show all linked worktrees."
+        };
+        let msg = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
         f.render_widget(msg, area);
         return;
     }
@@ -706,14 +853,14 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
                     Style::default().fg(Color::DarkGray),
                 )
             };
-            let title = tile_title(tile);
+            let title = tile_title(tile, state.repo_roots.len() > 1);
             let block = Block::default()
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(border_style);
 
-            let text = if tile.running {
-                state.panes.get(&tile.name).cloned().unwrap_or_default()
+            let text = if let Some(session) = &tile.tmux_session {
+                state.panes.get(session).cloned().unwrap_or_default()
             } else {
                 "no tmux session — press Enter to restart the agent here".to_string()
             };
@@ -740,9 +887,18 @@ fn draw_grid(f: &mut Frame, area: Rect, state: &mut AppState) {
 
 /// `name [agent] (stopped)`. The agent tag is what makes a mixed grid readable at a
 /// glance; it's absent for a worktree the session store has no record of.
-fn tile_title(tile: &Tile) -> String {
+fn tile_title(tile: &Tile, show_repo: bool) -> String {
+    let repo = show_repo
+        .then(|| {
+            tile.repo_root
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_else(|| tile.repo_root.to_string_lossy())
+        })
+        .map(|repo| format!("{repo}/"))
+        .unwrap_or_default();
     format!(
-        " {}{}{} ",
+        " {repo}{}{}{} ",
         tile.name,
         tile.agent
             .as_deref()
@@ -770,7 +926,7 @@ fn agent_choices(state: &AppState, picked: usize) -> Vec<Span<'static>> {
 }
 
 fn draw_status_line(f: &mut Frame, area: Rect, state: &AppState) {
-    if let Mode::NewAgent { agent } = &state.mode {
+    if let Mode::NewAgent { agent, .. } = &state.mode {
         let mut spans = agent_choices(state, *agent);
         spans.push(Span::styled(
             " \u{2190}\u{2192}/1-9 pick   Enter continue   Esc cancel",
@@ -781,9 +937,14 @@ fn draw_status_line(f: &mut Frame, area: Rect, state: &AppState) {
     }
     let line = match &state.mode {
         Mode::NewAgent { .. } => unreachable!("handled above"),
-        Mode::NewInput { name, agent } => format!(
-            "{} session name: {name}_   (Tab changes agent)",
-            state.agents[*agent].name
+        Mode::NewInput {
+            name,
+            agent,
+            repo_root,
+        } => format!(
+            "{} session in {}: {name}_   (Tab changes agent)",
+            state.agents[*agent].name,
+            repo_root.display()
         ),
         Mode::ConfirmKill => {
             let name = state
@@ -806,11 +967,40 @@ mod tests {
         Rect::new(0, 0, w, h)
     }
 
+    #[test]
+    fn a_repo_launch_stays_scoped_to_that_repo() {
+        assert_eq!(
+            repository_scope(
+                Some(PathBuf::from("/code/current")),
+                &[PathBuf::from("/code/one"), PathBuf::from("/code/two")],
+            ),
+            [PathBuf::from("/code/current")]
+        );
+    }
+
+    #[test]
+    fn a_non_repo_launch_uses_every_known_repo() {
+        let known = [PathBuf::from("/code/one"), PathBuf::from("/code/two")];
+        assert_eq!(repository_scope(None, &known), known);
+    }
+
+    #[test]
+    fn global_view_hides_unmanaged_stopped_worktrees_until_requested() {
+        assert!(!show_all_by_default(&None));
+        assert!(show_all_by_default(&Some(PathBuf::from("/code/repo"))));
+        assert!(!worktree_visible(false, false, false));
+        assert!(worktree_visible(false, true, false));
+        assert!(worktree_visible(false, false, true));
+        assert!(worktree_visible(true, false, false));
+    }
+
     fn tagged_tile(agent: Option<&str>, running: bool) -> Tile {
         Tile {
             name: "sess".to_string(),
+            repo_root: PathBuf::from("/code/repo"),
             worktree_path: PathBuf::from("/tmp/sess"),
             running,
+            tmux_session: running.then(|| "sess".to_string()),
             agent: agent.map(str::to_string),
         }
     }
@@ -818,19 +1008,23 @@ mod tests {
     #[test]
     fn tile_title_tags_the_agent() {
         assert_eq!(
-            tile_title(&tagged_tile(Some("codex"), true)),
+            tile_title(&tagged_tile(Some("codex"), true), false),
             " sess [codex] "
         );
         assert_eq!(
-            tile_title(&tagged_tile(Some("codex"), false)),
+            tile_title(&tagged_tile(Some("codex"), false), false),
             " sess [codex] (stopped) "
         );
     }
 
     #[test]
     fn tile_title_omits_an_unknown_agent() {
-        assert_eq!(tile_title(&tagged_tile(None, true)), " sess ");
-        assert_eq!(tile_title(&tagged_tile(None, false)), " sess (stopped) ");
+        assert_eq!(tile_title(&tagged_tile(None, true), false), " sess ");
+        assert_eq!(
+            tile_title(&tagged_tile(None, false), false),
+            " sess (stopped) "
+        );
+        assert_eq!(tile_title(&tagged_tile(None, true), true), " repo/sess ");
     }
 
     #[test]
@@ -891,8 +1085,10 @@ mod tests {
     fn tile(name: &str, running: bool) -> Tile {
         Tile {
             name: name.to_string(),
+            repo_root: PathBuf::from("/repo"),
             worktree_path: PathBuf::from("/tmp").join(name),
             running,
+            tmux_session: running.then(|| name.to_string()),
             agent: None,
         }
     }
@@ -943,7 +1139,8 @@ mod tests {
             mode: Mode::Normal,
             message: None,
             light_bg: false,
-            repo_root: PathBuf::from("/tmp"),
+            repo_roots: vec![PathBuf::from("/tmp")],
+            show_all_worktrees: true,
             agents: Vec::new(),
             cleanup_tx,
             cleanup_rx,
