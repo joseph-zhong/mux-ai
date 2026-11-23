@@ -235,15 +235,19 @@ pub fn prune(repo_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TMP_REPO: AtomicU64 = AtomicU64::new(0);
 
     fn tmp_repo() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "muxai-test-{}-{}",
+            "muxai-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_TMP_REPO.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir_all(&dir).unwrap();
         // macOS temp_dir is a symlink; canonicalize so it matches git's absolute output.
